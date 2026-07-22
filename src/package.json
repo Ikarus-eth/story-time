@@ -1,0 +1,14 @@
+{
+  "name": "story-time-build",
+  "private": true,
+  "scripts": {
+    "build": "esbuild entry.jsx --bundle --minify --outfile=../app.js --loader:.jsx=jsx --define:process.env.NODE_ENV='\"production\"'"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

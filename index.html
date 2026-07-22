@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1"/>
+<title>Story Time</title>
+
+<!-- Add-to-Home-Screen behaviour on iPad/iPhone: opens full-screen, no browser chrome -->
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="Story Time"/>
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png"/>
+
+<!-- Web manifest: name + icons for the home-screen bookmark -->
+<link rel="manifest" href="manifest.json"/>
+<link rel="icon" href="icons/icon-192.png"/>
+<meta name="theme-color" content="#EFF4F3"/>
+
+<style>
+  html,body{margin:0;padding:0;background:#EFF4F3;height:100%;
+    -webkit-text-size-adjust:100%;overscroll-behavior-y:none}
+  #root{min-height:100vh}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- Your settings: worker URL, optional secret, optional pollinations key -->
+<script src="config.js"></script>
+<!-- The built app (React + ReactDOM + Story Time, bundled). Rebuild only if the app itself changes. -->
+<script src="app.js"></script>
+</body>
+</html>
