@@ -9,7 +9,7 @@ window.APP_CONFIG = {
   // Paste the URL your Cloudflare Worker gives you after deploying it,
   // with /v1/messages on the end. Example:
   // "https://story-time-proxy.YOUR-SUBDOMAIN.workers.dev/v1/messages"
-  WORKER_URL: "",
+  WORKER_URL: "https://story-time-proxy.gvmdc2tpsb.workers.dev/v1/messages",
 
   // Optional. If you set APP_SECRET below to some random string, put the
   // exact same string here (must match the Worker's APP_SECRET exactly).
