@@ -7,8 +7,7 @@
 window.APP_CONFIG = {
 
   // Paste the URL your Cloudflare Worker gives you after deploying it,
-  // with /v1/messages on the end. Example:
-  // "https://story-time-proxy.YOUR-SUBDOMAIN.workers.dev/v1/messages"
+  // with /v1/messages on the end.
   WORKER_URL: "https://story-time-proxy.gvmdc2tpsb.workers.dev/v1/messages",
 
   // Optional. If you set APP_SECRET below to some random string, put the
@@ -20,10 +19,18 @@ window.APP_CONFIG = {
   // recommended default (cheaper than the older claude-sonnet-4-6).
   MODEL: "claude-sonnet-5",
 
-  // Optional. A pollinations.ai PUBLISHABLE key (starts with "pk_") from
-  // enter.pollinations.ai switches illustrations to their gptimage-large
-  // model (real GPT-Image quality, costs Pollen credits there).
-  // Leave blank to keep using the free, unlimited "flux" model.
+  // Old direct/publishable-key path. Superseded by IMAGE_URL below - leave
+  // blank now that images route through the Worker.
   POLLINATIONS_KEY: "",
+
+  // Routes images through your Worker using the unlimited SECRET
+  // pollinations key (set as a Worker secret, never here).
+  IMAGE_URL: "https://story-time-proxy.gvmdc2tpsb.workers.dev/image",
+
+  // Optional. A short physical description of the reader, in your own
+  // words, e.g. "curly dark brown hair in two braids, green eyes, freckles".
+  // Appended to every image prompt so her look stays consistent chapter to
+  // chapter. Leave blank - this is never guessed or invented automatically.
+  CHARACTER_LOOK: "",
 
 };
