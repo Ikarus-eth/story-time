@@ -7,8 +7,9 @@
 window.APP_CONFIG = {
 
   // Paste the URL your Cloudflare Worker gives you after deploying it,
-  // with /v1/messages on the end.
-  WORKER_URL: "https://story-time-proxy.gvmdc2tpsb.workers.dev/v1/messages",
+  // with /v1/messages on the end. Example:
+  // "https://story-time-proxy.YOUR-SUBDOMAIN.workers.dev/v1/messages"
+  WORKER_URL: "",
 
   // Optional. If you set APP_SECRET below to some random string, put the
   // exact same string here (must match the Worker's APP_SECRET exactly).
@@ -19,13 +20,19 @@ window.APP_CONFIG = {
   // recommended default (cheaper than the older claude-sonnet-4-6).
   MODEL: "claude-sonnet-5",
 
-  // Old direct/publishable-key path. Superseded by IMAGE_URL below - leave
-  // blank now that images route through the Worker.
+  // Optional. A pollinations.ai PUBLISHABLE key (starts with "pk_") from
+  // enter.pollinations.ai switches illustrations to their gptimage-large
+  // model (real GPT-Image quality, costs Pollen credits there).
+  // Leave blank to keep using the free, unlimited "flux" model.
+  // Superseded by IMAGE_URL below if that's set - kept as a fallback.
   POLLINATIONS_KEY: "",
 
-  // Routes images through your Worker using the unlimited SECRET
-  // pollinations key (set as a Worker secret, never here).
-  IMAGE_URL: "https://story-time-proxy.gvmdc2tpsb.workers.dev/image",
+  // Optional, recommended once you've added the /image route to your
+  // Worker (see README). Your Worker's URL with /image on the end, e.g.
+  // "https://story-time-proxy.YOUR-SUBDOMAIN.workers.dev/image"
+  // Routes images through your Worker using an unlimited SECRET
+  // pollinations key instead of the rate-limited publishable one above.
+  IMAGE_URL: "",
 
   // Optional. A short physical description of the reader, in your own
   // words, e.g. "curly dark brown hair in two braids, green eyes, freckles".
