@@ -35,6 +35,14 @@ const CHARACTER_LOOK = (typeof window!=="undefined"&&window.APP_CONFIG&&window.A
 /* Real-photo fallback tier (Openverse, keyless) between the AI illustration and the
    hand-drawn SVG scene. Set to false to disable and go straight to SVG on failure. */
 const ENABLE_PHOTO_FALLBACK = true;
+/* Illustration timing. The Worker draws with gpt-image-2, which takes 20-60s and
+   occasionally up to two minutes - far longer than pollinations did. So the photo
+   tier is now shown EARLY as a placeholder while the real illustration is still
+   being drawn, and the illustration replaces it the moment it arrives. Before this,
+   a single 15s timer unmounted the <img> and the generated picture, already paid
+   for, could never appear at all. */
+const IMG_PLACEHOLDER_MS = 6000;    // show the photo/SVG this quickly
+const IMG_GIVE_UP_MS = 105000;      // stop waiting for the illustration after this
 /* The reader's own name - cast as the story's hero by default. */
 const READER_NAME = "Juna";
 /* Multi-chapter books: cap chapters so a story always reaches a real ending, and only
@@ -799,8 +807,11 @@ function QuestionCard({num,q,st,onPick,isKnown,onWord}){
 function StoryImage({prompt,photoQuery,scene,seed,elements}){
   const [phase,setPhase]=useState("loading"); // loading | img | photo | fallback
   const [photoUrl,setPhotoUrl]=useState(null);
+  const [genDead,setGenDead]=useState(false); // stop waiting for the illustration
   const triedPhoto=useRef(false);
+  const genLoaded=useRef(false);
   const timeoutRef=useRef(null);
+  const giveUpRef=useRef(null);
   const genUrl=useMemo(()=>{
     if(!prompt) return null;
     const look=CHARACTER_LOOK?` ${READER_NAME} looks like: ${CHARACTER_LOOK}.`:"";
@@ -815,56 +826,78 @@ function StoryImage({prompt,photoQuery,scene,seed,elements}){
   async function tryPhoto(){
     if(triedPhoto.current) return;
     triedPhoto.current=true;
-    if(!ENABLE_PHOTO_FALLBACK||!photoQuery){ setPhase("fallback"); return; }
+    if(!ENABLE_PHOTO_FALLBACK||!photoQuery){ if(!genLoaded.current) setPhase("fallback"); return; }
     try{
       const res=await fetch("https://api.openverse.org/v1/images/?q="
         +encodeURIComponent(photoQuery)+"&license=cc0,pdm,by,by-sa&page_size=8&mature=false");
       const j=await res.json();
+      // The illustration may have landed while this request was in flight.
+      // If so it stays on screen and the photo is discarded.
+      if(genLoaded.current) return;
       const list=(j&&Array.isArray(j.results))?j.results.filter(r=>r&&(r.thumbnail||r.url)):[];
       if(list.length){
         const pick=list[Math.floor(Math.random()*list.length)];
         setPhotoUrl(pick.thumbnail||pick.url);
         setPhase("photo");
       }else setPhase("fallback");
-    }catch(e){ setPhase("fallback"); }
+    }catch(e){ if(!genLoaded.current) setPhase("fallback"); }
   }
 
-  function onGenLoad(){
+  function clearTimers(){
     if(timeoutRef.current){ clearTimeout(timeoutRef.current); timeoutRef.current=null; }
-    triedPhoto.current=true; // gen image is showing; lock out any late fallback attempt
+    if(giveUpRef.current){ clearTimeout(giveUpRef.current); giveUpRef.current=null; }
+  }
+
+  // The illustration wins whenever it arrives, even if the photo placeholder or
+  // the SVG is already on screen. This is the whole point of the rewrite.
+  function onGenLoad(){
+    clearTimers();
+    genLoaded.current=true;
+    triedPhoto.current=true;
     setPhase("img");
+  }
+
+  function onGenError(){
+    clearTimers();
+    setGenDead(true);
+    tryPhoto();
   }
 
   useEffect(()=>{
     triedPhoto.current=false;
+    genLoaded.current=false;
     setPhotoUrl(null);
+    setGenDead(false);
     setPhase(genUrl?"loading":"fallback");
     if(!genUrl){ tryPhoto(); return; }
-    timeoutRef.current=setTimeout(tryPhoto,15000);
-    return ()=>{ if(timeoutRef.current) clearTimeout(timeoutRef.current); };
+    // Show something quickly, but do NOT unmount the illustration when we do.
+    timeoutRef.current=setTimeout(tryPhoto,IMG_PLACEHOLDER_MS);
+    giveUpRef.current=setTimeout(()=>setGenDead(true),IMG_GIVE_UP_MS);
+    return clearTimers;
     // eslint-disable-next-line
   },[genUrl,photoQuery]);
 
   const fbScene=SCENES.includes(scene)?scene:"forest";
   return (
     <div className="imgwrap illu pop">
-      {genUrl&&(phase==="loading"||phase==="img")&&(
+      {genUrl&&!genDead&&(
         <img src={genUrl} alt=""
           style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",
-            opacity:phase==="img"?1:0,transition:"opacity .4s"}}
+            opacity:phase==="img"?1:0,transition:"opacity .4s",zIndex:3,
+            pointerEvents:phase==="img"?"auto":"none"}}
           onLoad={onGenLoad}
-          onError={tryPhoto}/>
+          onError={onGenError}/>
       )}
       {phase==="photo"&&photoUrl&&(
         <img src={photoUrl} alt="" className="fi"
-          style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover"}}
-          onError={()=>setPhase("fallback")}/>
+          style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",zIndex:2}}
+          onError={()=>{ if(!genLoaded.current) setPhase("fallback"); }}/>
       )}
       {phase==="fallback"&&(
-        <div style={{position:"absolute",inset:0}}
+        <div style={{position:"absolute",inset:0,zIndex:1}}
           dangerouslySetInnerHTML={{__html:sceneSvg(fbScene,seed,elements)}}/>
       )}
-      {phase==="loading"&&<div className="skel" style={{position:"absolute",inset:0}}/>}
+      {phase==="loading"&&<div className="skel" style={{position:"absolute",inset:0,zIndex:0}}/>}
     </div>
   );
 }

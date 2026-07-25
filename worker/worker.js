@@ -1,7 +1,24 @@
 /* ============================================================
-   Story Time — Cloudflare Worker proxy.  REVISION 4.
+   Story Time — Cloudflare Worker proxy.  REVISION 5.
 
-   Changes vs. the version you have live (each marked [Rn] below
+   NEW IN REVISION 5:
+
+   [R10] SSE buffer is flushed after the read loop. The known open
+         bug: if the final event did not end with a blank line,
+         message_stop was never seen and a perfectly good story was
+         reported as "Stream ended early (no message_stop)".
+   [R11] /image now generates with OpenAI gpt-image-2 when
+         OPENAI_API_KEY is set, and falls back to pollinations.ai
+         automatically on ANY failure (missing key, org not yet
+         verified, 429, moderation block, timeout). If the OpenAI
+         side is not working yet, illustrations behave exactly as
+         they do today. Nothing to roll back.
+   [R12] CHARACTER_LOOK can now live here as a Worker secret and is
+         appended to the image prompt server-side, so no physical
+         description of a real child ever sits in the public repo.
+         Optional — leave it unset and nothing is appended.
+
+   Changes from revision 4 (each marked [Rn] below
    and explained in the review):
 
    [R1] The whole background task is wrapped in try/finally, so the
@@ -35,11 +52,26 @@
 
    Deploy: Workers & Pages -> story-time-proxy -> Edit code ->
    replace everything -> Deploy.
-   Secrets required (Settings -> Variables): ANTHROPIC_API_KEY,
-   POLLINATIONS_KEY.
+   Secrets (Settings -> Variables):
+     ANTHROPIC_API_KEY   required
+     OPENAI_API_KEY      required for gpt-image-2 illustrations
+     POLLINATIONS_KEY    required (fallback illustrations)
+     CHARACTER_LOOK      optional, see [R12]
    ============================================================ */
 
 const ALLOWED_ORIGIN = "https://ikarus-eth.github.io";
+
+/* ---- illustration settings. Change these, redeploy, done. ----
+   Cost per image at 1536x1024, from OpenAI's pricing table:
+     low $0.005   medium $0.041   high $0.165
+   Start on medium. Try low for a story and compare — for flat
+   picture-book art it is often indistinguishable and 8x cheaper. */
+const IMAGE_MODEL       = "gpt-image-2";
+const IMAGE_QUALITY     = "medium";       // "low" | "medium" | "high"
+const IMAGE_SIZE        = "1536x1024";    // landscape; app displays it at 832x520
+const IMAGE_FORMAT      = "webp";         // smaller than png = less Worker CPU
+const IMAGE_COMPRESSION = 80;
+const IMAGE_TIMEOUT_MS  = 90000;          // leaves room to fall back to pollinations
 
 // Optional extra check — leave blank to skip.
 const APP_SECRET = "";
@@ -58,7 +90,7 @@ export default {
     const originOk = origin === ALLOWED_ORIGIN || referer.indexOf(ALLOWED_ORIGIN) === 0;
 
     if (url.pathname === "/image") {
-      return handleImage(url, env, originOk);
+      return handleImage(url, env, originOk, ctx);
     }
     return handleMessages(request, env, origin, originOk, ctx);
   },
@@ -166,6 +198,34 @@ async function handleMessages(request, env, origin, originOk, ctx) {
       let sawStop = false;
       let streamError = null;
 
+      // [R10] one block parser, used both inside the read loop and once more
+      // on whatever is left in the buffer when the loop ends.
+      const processBlock = (block) => {
+        // [R7] cheap pre-filter: only three event types need parsing.
+        const isDelta = block.indexOf("content_block_delta") >= 0;
+        const isMsgDelta = !isDelta && block.indexOf("message_delta") >= 0;
+        const isErr = !isDelta && !isMsgDelta && block.indexOf('"error"') >= 0;
+        if (block.indexOf("message_stop") >= 0) sawStop = true;
+        if (!isDelta && !isMsgDelta && !isErr) return;
+
+        const di = block.indexOf("data:");
+        if (di < 0) return;
+        const dataStr = block.slice(di + 5).trim();
+        if (!dataStr) return;
+
+        let evt;
+        try { evt = JSON.parse(dataStr); } catch (e) { return; }
+        eventCount++;
+
+        if (evt.type === "content_block_delta") {
+          if (evt.delta && evt.delta.type === "text_delta") text += evt.delta.text || "";
+        } else if (evt.type === "message_delta") {
+          if (evt.delta && evt.delta.stop_reason) stopReason = evt.delta.stop_reason;   // [R3]
+        } else if (evt.type === "error") {                                              // [R2]
+          streamError = (evt.error && (evt.error.message || evt.error.type)) || "stream error";
+        }
+      };
+
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -178,32 +238,17 @@ async function handleMessages(request, env, origin, originOk, ctx) {
           while ((idx = buf.indexOf("\n\n")) >= 0) {
             const block = buf.slice(0, idx);
             buf = buf.slice(idx + 2);
-
-            // [R7] cheap pre-filter: only three event types need parsing.
-            const isDelta = block.indexOf("content_block_delta") >= 0;
-            const isMsgDelta = !isDelta && block.indexOf("message_delta") >= 0;
-            const isErr = !isDelta && !isMsgDelta && block.indexOf('"error"') >= 0;
-            if (block.indexOf("message_stop") >= 0) sawStop = true;
-            if (!isDelta && !isMsgDelta && !isErr) continue;
-
-            const di = block.indexOf("data:");
-            if (di < 0) continue;
-            const dataStr = block.slice(di + 5).trim();
-            if (!dataStr) continue;
-
-            let evt;
-            try { evt = JSON.parse(dataStr); } catch (e) { continue; }
-            eventCount++;
-
-            if (evt.type === "content_block_delta") {
-              if (evt.delta && evt.delta.type === "text_delta") text += evt.delta.text || "";
-            } else if (evt.type === "message_delta") {
-              if (evt.delta && evt.delta.stop_reason) stopReason = evt.delta.stop_reason;   // [R3]
-            } else if (evt.type === "error") {                                              // [R2]
-              streamError = (evt.error && (evt.error.message || evt.error.type)) || "stream error";
-            }
+            processBlock(block);
           }
         }
+
+        // [R10] THE FIX. Anthropic does not guarantee that the last event is
+        // followed by a blank line. Without this, message_stop sitting in the
+        // tail of the buffer was never seen and a complete, correct story was
+        // reported to the browser as "Stream ended early (no message_stop)".
+        buf += decoder.decode();            // flush any trailing multi-byte char
+        if (buf.trim()) processBlock(buf);
+        buf = "";
       } catch (e) {
         const aborted = ac.signal.aborted;
         console.error("[Worker] FAIL stream-read", aborted ? "(timeout)" : "",
@@ -272,17 +317,116 @@ function jsonError(corsHeaders, status, message) {
   });
 }
 
-async function handleImage(url, env, originOk) {
+/* ---------------------------------------------------------------
+   /image — gpt-image-2 first, pollinations second.  [R11]
+
+   The route's contract is unchanged: GET with ?prompt&width&height&seed,
+   responds with raw image bytes. The app sets it as an <img src> and
+   knows nothing about which service drew the picture.
+   --------------------------------------------------------------- */
+async function handleImage(url, env, originOk, ctx) {
   const headers = { "Access-Control-Allow-Origin": originOk ? "*" : "null", "Vary": "Origin" };
 
   if (!originOk) return new Response("Forbidden origin", { status: 403, headers });
 
-  const key = env.POLLINATIONS_KEY;
-  if (!key) return new Response("Worker misconfigured: POLLINATIONS_KEY not set", { status: 500, headers });
-
   const prompt = url.searchParams.get("prompt") || "";
   if (!prompt) return new Response("Missing prompt", { status: 400, headers });
 
+  // The app's image URL is deterministic (prompt + seed), so re-reading a
+  // chapter should never be billed twice. Note: the Cache API is a no-op on
+  // *.workers.dev and only starts working if this Worker is ever put behind
+  // a custom domain. The Cache-Control header below is what actually saves
+  // money today, by caching on Juna's iPad for 24h.
+  const cache = (typeof caches !== "undefined" && caches.default) ? caches.default : null;
+  const cacheKey = new Request(url.toString(), { method: "GET" });
+  if (cache) {
+    const hit = await cache.match(cacheKey).catch(() => null);
+    if (hit) {
+      console.log("[Worker] IMG cache-hit");
+      return hit;
+    }
+  }
+
+  let res = null;
+  if (env.OPENAI_API_KEY) res = await openaiImage(prompt, env, headers);
+  if (!res) res = await pollinationsImage(url, env, headers);
+
+  if (cache && res.ok && ctx && ctx.waitUntil) {
+    try { ctx.waitUntil(cache.put(cacheKey, res.clone())); } catch (e) {}
+  }
+  return res;
+}
+
+// Returns a Response on success, or null so the caller falls back.
+async function openaiImage(prompt, env, headers) {
+  // [R12] optional, and deliberately server-side only.
+  const look = (env.CHARACTER_LOOK || "").trim();
+  const full = look ? prompt + " " + look : prompt;
+
+  const ac = new AbortController();
+  const timeoutId = setTimeout(() => ac.abort(), IMAGE_TIMEOUT_MS);
+  const started = Date.now();
+
+  try {
+    const r = await fetch("https://api.openai.com/v1/images/generations", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "authorization": "Bearer " + env.OPENAI_API_KEY,
+      },
+      body: JSON.stringify({
+        model: IMAGE_MODEL,
+        prompt: full.slice(0, 4000),
+        size: IMAGE_SIZE,
+        quality: IMAGE_QUALITY,
+        output_format: IMAGE_FORMAT,
+        output_compression: IMAGE_COMPRESSION,
+        moderation: "auto",     // keep the stricter default; this is a kids' app
+        n: 1,
+      }),
+      signal: ac.signal,
+    });
+
+    if (!r.ok) {
+      const errText = await r.text().catch(() => "");
+      // 403 here almost always means the org is not ID-verified yet.
+      console.error("[Worker] IMG FAIL openai", r.status, errText.slice(0, 300));
+      return null;
+    }
+
+    const j = await r.json();
+    const b64 = j && j.data && j.data[0] && j.data[0].b64_json;
+    if (!b64) {
+      console.error("[Worker] IMG FAIL openai no-b64");
+      return null;
+    }
+
+    const bytes = b64ToBytes(b64);
+    console.log("[Worker] IMG OK openai", (Date.now() - started) + "ms",
+      IMAGE_QUALITY, bytes.length, "bytes");
+
+    const out = new Headers(headers);
+    out.set("Content-Type", "image/" + IMAGE_FORMAT);
+    out.set("Cache-Control", "public, max-age=86400");
+    return new Response(bytes, { status: 200, headers: out });
+  } catch (e) {
+    console.error("[Worker] IMG FAIL openai",
+      ac.signal.aborted ? "(timeout " + Math.round(IMAGE_TIMEOUT_MS / 1000) + "s)" : "",
+      (e && e.message) || String(e));
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function pollinationsImage(url, env, headers) {
+  const key = env.POLLINATIONS_KEY;
+  if (!key) {
+    console.error("[Worker] IMG FAIL no-pollinations-key");
+    return new Response("Worker misconfigured: POLLINATIONS_KEY not set", { status: 500, headers });
+  }
+
+  const prompt = url.searchParams.get("prompt") || "";
   const width = url.searchParams.get("width") || "832";
   const height = url.searchParams.get("height") || "520";
   const seed = url.searchParams.get("seed") || "1";
@@ -297,8 +441,11 @@ async function handleImage(url, env, originOk) {
   try {
     upstream = await fetch(target);
   } catch (e) {
+    console.error("[Worker] IMG FAIL pollinations unreachable");
     return new Response("Could not reach pollinations", { status: 502, headers });
   }
+
+  console.log("[Worker] IMG", upstream.ok ? "OK" : "FAIL", "pollinations", upstream.status);
 
   const outHeaders = new Headers(headers);
   outHeaders.set("Content-Type", upstream.headers.get("Content-Type") || "image/jpeg");
@@ -306,4 +453,14 @@ async function handleImage(url, env, originOk) {
   // illustration for 24 hours, because the URL is deterministic (prompt+seed).
   outHeaders.set("Cache-Control", upstream.ok ? "public, max-age=86400" : "no-store");
   return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
+}
+
+// Plain loop, not Uint8Array.from(..., mapFn): the loop is several times
+// faster and this runs inside the free plan's 10ms CPU budget.
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const n = bin.length;
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
