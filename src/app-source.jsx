@@ -26,6 +26,12 @@ const WCACHE_MAX = 300;
    Pollen credits). Leave empty to keep using the free, unlimited "flux" model.
    Standalone build: set this in config.js instead (window.APP_CONFIG.POLLINATIONS_KEY). */
 const POLLINATIONS_KEY = (typeof window!=="undefined"&&window.APP_CONFIG&&window.APP_CONFIG.POLLINATIONS_KEY)||"";
+/* Optional: the Worker's /image route. Routes illustrations through the Worker
+   using an unlimited SECRET pollinations key. Supersedes POLLINATIONS_KEY. */
+const IMAGE_URL = (typeof window!=="undefined"&&window.APP_CONFIG&&window.APP_CONFIG.IMAGE_URL)||"";
+/* Optional: a short physical description of the reader, appended to every image
+   prompt so her look stays consistent chapter to chapter. Never guessed. */
+const CHARACTER_LOOK = (typeof window!=="undefined"&&window.APP_CONFIG&&window.APP_CONFIG.CHARACTER_LOOK)||"";
 /* Real-photo fallback tier (Openverse, keyless) between the AI illustration and the
    hand-drawn SVG scene. Set to false to disable and go straight to SVG on failure. */
 const ENABLE_PHOTO_FALLBACK = true;
@@ -491,22 +497,58 @@ async function sSet(key, val){
 }
 
 /* ---------------- Claude API (via your own Worker proxy) ---------------- */
-async function askClaude(prompt){
+/* Every request registers here so a new story can cancel the old one's
+   background work instead of leaving it to retry for minutes and compete
+   for Anthropic rate-limit headroom. */
+const inFlight=new Set();
+function abortAllRequests(){
+  for(const c of inFlight){ try{ c.abort(); }catch(e){} }
+  inFlight.clear();
+}
+/* Errors that cannot succeed on a retry - don't burn four attempts on them. */
+const NON_RETRYABLE=/WORKER_URL|Forbidden|misconfigured|cancelled/i;
+
+async function askClaude(prompt,opts){
   const cfg=(typeof window!=="undefined"&&window.APP_CONFIG)||{};
   if(!cfg.WORKER_URL) throw new Error("APP_CONFIG.WORKER_URL is not set - edit config.js");
   const headers={"Content-Type":"application/json"};
   if(cfg.APP_SECRET) headers["X-App-Secret"]=cfg.APP_SECRET;
-  const res=await fetch(cfg.WORKER_URL,{
-    method:"POST",
-    headers,
-    body:JSON.stringify({
-      model: cfg.MODEL||"claude-sonnet-4-6",
-      max_tokens:1000,
-      messages:[{role:"user",content:prompt}]
-    })
-  });
-  const data=await res.json();
+  const timeoutMs=(opts&&opts.timeoutMs)||180000;
+  const ctrl=new AbortController();
+  inFlight.add(ctrl);
+  const timer=setTimeout(()=>ctrl.abort(),timeoutMs);
+  let res;
+  try{
+    res=await fetch(cfg.WORKER_URL,{
+      method:"POST",
+      headers,
+      signal:ctrl.signal,
+      body:JSON.stringify({
+        model: cfg.MODEL||"claude-sonnet-4-6",
+        max_tokens:10000,
+        messages:[{role:"user",content:prompt}]
+      })
+    });
+  }catch(e){
+    if(ctrl.signal.aborted) throw new Error("cancelled or timed out after "+Math.round(timeoutMs/1000)+"s");
+    throw new Error("network: "+((e&&e.message)||String(e)));
+  }finally{
+    clearTimeout(timer); inFlight.delete(ctrl);
+  }
+  const raw=await res.text();
+  if(!res.ok) throw new Error("worker HTTP "+res.status+": "+raw.slice(0,160));
+  let data;
+  try{ data=JSON.parse(raw); }
+  catch(e){
+    /* The Worker writes whitespace heartbeats and then one JSON object.
+       Whitespace only means the body was cut before the payload was written. */
+    throw new Error(raw.trim()===""
+      ? "empty response from worker ("+raw.length+" heartbeat bytes)"
+      : "worker sent non-JSON ("+raw.length+" bytes): "+raw.slice(0,120));
+  }
   if(data&&data.error) throw new Error(data.error.message||"api error");
+  if(data&&data.stop_reason&&data.stop_reason!=="end_turn"&&data.stop_reason!=="stop_sequence")
+    throw new Error("truncated (stop_reason: "+data.stop_reason+")");
   return (data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
 }
 function parseLoose(raw){
@@ -516,13 +558,20 @@ function parseLoose(raw){
   try{ return JSON.parse(t); }catch(e){}
   return JSON.parse(t.replace(/[\u0000-\u001F]+/g," "));
 }
-async function askJson(prompt){
+/* Anthropic rate-limit buckets refill on a 60s window, so short retries all
+   land inside the same exhausted window. Jitter avoids re-colliding. */
+const BACKOFF=[0,4000,12000,30000];
+async function askJson(prompt,opts){
   let last;
-  for(let i=0;i<2;i++){
+  for(let i=0;i<4;i++){
+    if(i>0) await new Promise(r=>setTimeout(r,BACKOFF[i]+Math.random()*2000));
     try{
       const extra=i===0?"":"\nIMPORTANT: reply with ONLY the JSON object on one single line. No other text. If needed, shorten the text to the lower end of the word range.";
-      return parseLoose(await askClaude(prompt+extra));
-    }catch(e){ last=e; }
+      return parseLoose(await askClaude(prompt+extra,opts));
+    }catch(e){
+      last=e;
+      if(NON_RETRYABLE.test(String(e&&e.message))) break;
+    }
   }
   throw last;
 }
@@ -554,7 +603,7 @@ function factPrompt(o){
     recycleLine(o.recycle),
     o.avoid&&o.avoid.length ? `Do NOT reuse these earlier ideas: ${o.avoid.join(" | ")}.` : "",
     `Create exactly ${L.fact.q} multiple-choice comprehension questions in simple English about THIS text. ${Q_RULES}`,
-    `Also include "image_prompt": one vivid English sentence describing the best scene to illustrate (characters, setting, mood, colors). Also include "scene": the closest match from this list: ${SCENES.join(", ")}. Also include "photo_query": 2-4 simple English keywords for finding a REAL PHOTO of the general setting or subject (not the specific plot), for example "red fox forest" or "medieval castle" or "ocean waves dolphins". Also include "visual_elements": 1-3 single concrete nouns for the most important characters or objects (e.g. ["fox","treasure chest"] or ["rabbit","owl"]), used to pick simple illustration icons. Also include "tricky_words": 8-12 single words copied exactly from your text that a German child at this level might not know (no names).`,
+    `Also include "image_prompt": one vivid, concrete English sentence for an illustrator - exactly what the main character is doing, where, and the mood, specific enough to draw, not vague. Also include "scene": the closest match from this list: ${SCENES.join(", ")}. Also include "photo_query": 2-4 simple English keywords for finding a REAL PHOTO of the general setting or subject (not the specific plot), for example "red fox forest" or "medieval castle" or "ocean waves dolphins". Also include "visual_elements": 1-3 single concrete nouns for the most important characters or objects (e.g. ["fox","treasure chest"] or ["rabbit","owl"]), used to pick simple illustration icons. Also include "tricky_words": 8-12 single words copied exactly from your text that a German child at this level might not know (no names).`,
     `Reply with ONLY one single-line JSON object, nothing else. No markdown. No line breaks anywhere:`,
     `{"title":"...","sections":["paragraph 1","paragraph 2"],"image_prompt":"...","scene":"forest","photo_query":"...","visual_elements":["...","..."],"tricky_words":["...","..."],"questions":[{"q":"...","options":["...","...","...","..."],"correct":0,"section":0,"evidence":"..."}]}`
   ];
@@ -573,7 +622,7 @@ function chapterOnePrompt(o){
     o.avoid&&o.avoid.length ? `Do NOT reuse these earlier ideas: ${o.avoid.join(" | ")}.` : "",
     `Also include "summary": one or two English sentences summing up chapter 1, for reference when writing the next chapter.`,
     `Create exactly ${L.ch.q} multiple-choice comprehension questions in simple English about THIS chapter. ${Q_RULES}`,
-    `Also include "image_prompt": one vivid English sentence describing the best scene from THIS chapter to illustrate. Also include "scene": closest match from: ${SCENES.join(", ")}. Also include "photo_query": 2-4 simple English keywords for a REAL PHOTO of the general setting or subject. Also include "visual_elements": 1-3 single concrete nouns for the most important characters or objects in this chapter. Also include "tricky_words": 6-10 single words copied exactly from THIS chapter's text that a German child at this level might not know (no names).`,
+    `Also include "image_prompt": one vivid, concrete English sentence for an illustrator - exactly what the main character is doing, where, and the mood in THIS chapter, specific enough to draw, not vague. Also include "scene": closest match from: ${SCENES.join(", ")}. Also include "photo_query": 2-4 simple English keywords for a REAL PHOTO of the general setting or subject. Also include "visual_elements": 1-3 single concrete nouns for the most important characters or objects in this chapter. Also include "tricky_words": 6-10 single words copied exactly from THIS chapter's text that a German child at this level might not know (no names).`,
     `Reply with ONLY one single-line JSON object, nothing else. No markdown. No line breaks anywhere:`,
     `{"title":"...","sections":["paragraph 1","paragraph 2"],"summary":"...","image_prompt":"...","scene":"forest","photo_query":"...","visual_elements":["...","..."],"tricky_words":["...","..."],"questions":[{"q":"...","options":["...","...","...","..."],"correct":0,"section":0,"evidence":"..."}]}`
   ];
@@ -594,7 +643,7 @@ function nextChapterPrompt(o){
     recycleLine(o.recycle),
     `Also include "summary": one or two English sentences summing up EVERYTHING so far including this chapter, for reference when writing the next chapter.`,
     `Create exactly ${L.ch.q} multiple-choice comprehension questions about THIS chapter only. ${Q_RULES}`,
-    `Also include "image_prompt": one vivid English sentence describing the best scene from THIS chapter to illustrate. Also include "scene": closest match from: ${SCENES.join(", ")}. Also include "photo_query": 2-4 simple English keywords for a REAL PHOTO of the general setting or subject. Also include "visual_elements": 1-3 single concrete nouns for the most important characters or objects in this chapter.`,
+    `Also include "image_prompt": one vivid, concrete English sentence for an illustrator - exactly what the main character is doing, where, and the mood in THIS chapter, specific enough to draw, not vague. Also include "scene": closest match from: ${SCENES.join(", ")}. Also include "photo_query": 2-4 simple English keywords for a REAL PHOTO of the general setting or subject. Also include "visual_elements": 1-3 single concrete nouns for the most important characters or objects in this chapter.`,
     `Reply with ONLY one single-line JSON object, no markdown, no line breaks:`,
     `{"sections":["paragraph 1","paragraph 2"],"summary":"...","image_prompt":"...","scene":"forest","photo_query":"...","visual_elements":["...","..."],"questions":[{"q":"...","options":["...","...","...","..."],"correct":0,"section":0,"evidence":"..."}]}`,
     `"section" = index (0-based) of the paragraph WITHIN THIS chapter (starting at 0) where the answer is found.`
@@ -754,8 +803,10 @@ function StoryImage({prompt,photoQuery,scene,seed,elements}){
   const timeoutRef=useRef(null);
   const genUrl=useMemo(()=>{
     if(!prompt) return null;
-    const styled="children's storybook illustration, soft watercolor and gouache, warm friendly colors, wholesome, cute, "
-      +prompt+", no text, no letters, no words";
+    const look=CHARACTER_LOOK?` ${READER_NAME} looks like: ${CHARACTER_LOOK}.`:"";
+    const styled="children's picture-book illustration, soft watercolor and gouache textures, warm buttery one-directional lighting, gentle rounded shapes, teal-and-honey color palette, tidy uncluttered composition with a single clear focal point, "
+      +prompt+look+", no text, no letters, no words, no signatures, no watermarks";
+    if(IMAGE_URL) return IMAGE_URL+"?prompt="+encodeURIComponent(styled)+"&width=832&height=520&seed="+(Number(seed)||1);
     const base="https://image.pollinations.ai/prompt/"+encodeURIComponent(styled)+"?width=832&height=520&nologo=true";
     if(POLLINATIONS_KEY) return base+"&model=gptimage-large&key="+encodeURIComponent(POLLINATIONS_KEY);
     return base+"&model=flux&seed="+(Number(seed)||1);
@@ -842,11 +893,24 @@ export default function App(){
   const [wordsSort,setWordsSort]=useState("new"); // new | due | az
   const [confirmDel,setConfirmDel]=useState(null);
   const [senseMap,setSenseMap]=useState({}); // per-story: surface word -> resolved sense key (when it differs from what's already known)
+  const [errDetail,setErrDetail]=useState(""); // real error message, shown small + gray for debugging
 
   const reqRef=useRef(0);
   const secRefs=useRef([]);
   const sessionStart=useRef(0);
   const bumpedRef=useRef(new Set()); // guards against double SRS-bump per word per sitting
+  const wakeRef=useRef(null);        // screen wake lock while a generation is running
+  const chapterBusy=useRef(false);   // guards continueChapter against a double tap
+
+  /* Keep the iPad awake while Claude is writing - a locked screen suspends the
+     fetch and the generation is lost. Silently unsupported on desktop Safari. */
+  async function keepAwake(){
+    try{ if("wakeLock" in navigator) wakeRef.current=await navigator.wakeLock.request("screen"); }catch(e){}
+  }
+  function releaseAwake(){
+    try{ if(wakeRef.current) wakeRef.current.release(); }catch(e){}
+    wakeRef.current=null;
+  }
 
   const knownCount=Object.keys(vocab).length;
 
@@ -1187,6 +1251,7 @@ export default function App(){
   }
 
   function openFromLibrary(entry){
+    abortAllRequests();
     reqRef.current++;
     sessionStart.current=Date.now();
     secRefs.current=[];
@@ -1209,6 +1274,9 @@ export default function App(){
 
   /* ---- story pipeline ---- */
   async function startStory(topicId){
+    abortAllRequests();
+    keepAwake();
+    setErrDetail("");
     const rid=++reqRef.current;
     const w=wish.trim();
     setLoadTopic(topicId);
@@ -1254,31 +1322,47 @@ export default function App(){
         summary:j.summary?String(j.summary):"",
         isFact, wish:w, validated:false, replay:false, libId:null, steerWish:""
       };
-      setStory(st); setScreen("read");
+      setStory(st); setScreen("read"); releaseAwake();
       const np={...prog,lastWish:w,
         topics:[{t:topicId,title:st.title},...prog.topics].slice(0,14)};
       setProg(np); sSet("progress",np);
-      preloadWords(rid,secs,j.tricky_words);
-      checkKnownSenses(rid,secs);
-      const validated=await validateQuestions(secs,qsRaw);
-      if(reqRef.current!==rid) return;
-      setStory(cur=>{
-        if(!cur) return cur;
+      /* Question validation gates both the questions block and the Continue
+         button in the render. It gets its own try so that a failure or a hang
+         can't strand the child on "Preparing your questions..." with a
+         perfectly readable story and no way forward. */
+      try{
+        const validated=await validateQuestions(secs,qsRaw);
+        if(reqRef.current!==rid) return;
         let nq=validated.map(q=>({...q,chapter:0,after:secs.length-1}));
         const vq=buildVocabQ(secs,recycle);
         if(vq) nq=[...nq,{...vq,chapter:0,after:secs.length-1}];
-        const ns={...cur,questions:nq,validated:true};
-        ns.libId=saveToLibrary(ns);
-        return ns;
-      });
-    }catch(e){
+        // saveToLibrary calls setLibrary, so it must not run inside a setStory updater.
+        const libId=saveToLibrary({...st,questions:nq,validated:true});
+        setStory(cur=>cur?{...cur,questions:nq,validated:true,libId}:cur);
+      }catch(e){
+        console.error("[StoryTime] question validation failed:",e);
+        if(reqRef.current!==rid) return;
+        setStory(cur=>cur?{...cur,validated:true}:cur); // never leave it false
+      }
       if(reqRef.current!==rid) return;
+      /* These only warm caches, so they run after validation rather than
+         racing it - three concurrent generations was enough to trip rate limits. */
+      preloadWords(rid,secs,j.tricky_words);
+      checkKnownSenses(rid,secs);
+    }catch(e){
+      console.error("[StoryTime] startStory failed:",e);
+      if(reqRef.current!==rid) return;
+      setErrDetail(e&&e.message?String(e.message):String(e));
+      releaseAwake();
       setScreen("error");
     }
   }
 
   async function continueChapter(){
-    if(!story) return;
+    if(!story||chapterBusy.current) return; // a double tap on iPad can fire twice
+    chapterBusy.current=true;
+    keepAwake();
+    setErrDetail("");
     const rid=reqRef.current;
     const chapterNum=story.chapterEnds.length+1; // 1-based number of the chapter about to be written
     const isFinal = chapterNum>=MAX_CHAPTERS;
@@ -1326,10 +1410,16 @@ export default function App(){
       });
       checkKnownSenses(rid,secs);
       setSteerWish("");
+      releaseAwake();
       setCh2(false);
     }catch(e){
+      console.error("[StoryTime] continueChapter failed:",e);
       if(reqRef.current!==rid) return;
+      setErrDetail(e&&e.message?String(e.message):String(e));
+      releaseAwake();
       setCh2("err");
+    }finally{
+      chapterBusy.current=false;
     }
   }
 
@@ -1576,6 +1666,7 @@ export default function App(){
   }
 
   function goHome(){
+    abortAllRequests();
     reqRef.current++;
     setStory(null); setAnswers({}); setHl(null); setPopup(null);
     setCards(null); setStats(null); setCh2(false); setConfirmDel(null);
@@ -1770,6 +1861,11 @@ export default function App(){
               <button className="btn btn-pri" onClick={()=>startStory(loadTopic||"animals")}>Try again</button>
               <button className="btn btn-plain" onClick={goHome}>Back home</button>
             </div>
+            {errDetail&&(
+              <div style={{color:"#B0B8B6",fontSize:11,marginTop:28,padding:"0 30px",wordBreak:"break-word"}}>
+                {errDetail}
+              </div>
+            )}
           </div>
         )}
 
@@ -1835,7 +1931,16 @@ export default function App(){
                                 placeholder="What should happen next? (optional)"
                                 value={steerWish} onChange={e=>setSteerWish(e.target.value)}/>
                             )}
-                            {ch2==="err"&&<div className="hint" style={{marginTop:12}}>Oops, that didn't work. Try again!</div>}
+                            {ch2==="err"&&(
+                              <div className="hint" style={{marginTop:12}}>
+                                Oops, that didn't work. Try again!
+                                {errDetail&&(
+                                  <div style={{fontWeight:400,fontSize:11,marginTop:6,opacity:0.75,wordBreak:"break-word"}}>
+                                    {errDetail}
+                                  </div>
+                                )}
+                              </div>
+                            )}
                             <button className="btn btn-pri" style={{width:"100%",marginTop:14}} disabled={ch2===true} onClick={continueChapter}>
                               {ch2===true?"Writing the next chapter…":"Continue to Chapter "+(ci+2)+" →"}
                             </button>
