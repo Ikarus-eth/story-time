@@ -9,7 +9,7 @@ window.APP_CONFIG = {
   // Paste the URL your Cloudflare Worker gives you after deploying it,
   // with /v1/messages on the end. Example:
   // "https://story-time-proxy.YOUR-SUBDOMAIN.workers.dev/v1/messages"
-  WORKER_URL: "",
+  WORKER_URL: "https://story-time-proxy.gvmdc2tpsb.workers.dev/v1/messages",
 
   // Optional. If you set APP_SECRET below to some random string, put the
   // exact same string here (must match the Worker's APP_SECRET exactly).
@@ -32,7 +32,7 @@ window.APP_CONFIG = {
   // "https://story-time-proxy.YOUR-SUBDOMAIN.workers.dev/image"
   // Routes images through your Worker using an unlimited SECRET
   // pollinations key instead of the rate-limited publishable one above.
-  IMAGE_URL: "",
+  IMAGE_URL: "https://story-time-proxy.gvmdc2tpsb.workers.dev/image",
 
   // Optional. A short physical description of the reader, in your own
   // words, e.g. "curly dark brown hair in two braids, green eyes, freckles".
