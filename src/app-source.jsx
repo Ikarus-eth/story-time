@@ -35,13 +35,11 @@ const CHARACTER_LOOK = (typeof window!=="undefined"&&window.APP_CONFIG&&window.A
 /* Real-photo fallback tier (Openverse, keyless) between the AI illustration and the
    hand-drawn SVG scene. Set to false to disable and go straight to SVG on failure. */
 const ENABLE_PHOTO_FALLBACK = true;
-/* Illustration timing. The Worker draws with gpt-image-2, which takes 20-60s and
-   occasionally up to two minutes - far longer than pollinations did. So the photo
-   tier is now shown EARLY as a placeholder while the real illustration is still
-   being drawn, and the illustration replaces it the moment it arrives. Before this,
-   a single 15s timer unmounted the <img> and the generated picture, already paid
-   for, could never appear at all. */
-const IMG_PLACEHOLDER_MS = 6000;    // show the photo/SVG this quickly
+/* Illustration timing. The Worker draws with gpt-image-2, which takes 20-60s.
+   While it draws, a drawn puppy fills the frame (see puppySvg). The Openverse
+   photo tier is no longer used as the everyday placeholder - it only appears
+   if the illustration genuinely fails or never arrives, because a real photo
+   is at least topical, whereas the puppy is not. */
 const IMG_GIVE_UP_MS = 105000;      // stop waiting for the illustration after this
 /* The reader's own name - cast as the story's hero by default. */
 const READER_NAME = "Juna";
@@ -359,6 +357,67 @@ function matchProps(elements){
     });
   });
   return found;
+}
+
+/* Placeholder shown while the real illustration is being generated.
+
+   Deliberately a drawn SVG rather than a photo from a random-dog API:
+   this is a seven- and ten-year-old's app, so the placeholder has to be
+   content we control completely. It also needs no network round trip, so
+   it is on screen instantly and cannot itself fail, arrive late, or turn
+   up blank. Varies with the chapter seed so it is not the same puppy in
+   every chapter. Same 400x250 viewBox and flat palette as sceneSvg. */
+function puppySvg(seed){
+  const s=Math.abs(Number(seed)||1);
+  const coats=[
+    {body:"#E9A73E",light:"#F6D79C",dark:"#CE8B26",ear:"#BE7C1E"}, // golden
+    {body:"#C88A5E",light:"#EBCDB0",dark:"#AC7048",ear:"#96603C"}, // chestnut
+    {body:"#B4BFC3",light:"#DFE6E8",dark:"#98A5AA",ear:"#87959B"}, // grey
+    {body:"#EFD9AE",light:"#FBF0D8",dark:"#D8BE8C",ear:"#C7AA76"}, // cream
+  ];
+  const c=coats[s%coats.length];
+  const patch=(s%3===0);
+  const u="p"+s; // unique animation names so two frames never collide
+  return `<svg viewBox='0 0 400 250' width='100%' height='100%' preserveAspectRatio='xMidYMid slice' xmlns='http://www.w3.org/2000/svg'>
+<style>
+@keyframes wag${u}{0%,100%{transform:rotate(-16deg)}50%{transform:rotate(18deg)}}
+@keyframes bob${u}{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+@keyframes twinkle${u}{0%,100%{opacity:.2;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}
+@keyframes dot${u}{0%,75%,100%{opacity:.22}35%{opacity:1}}
+.t${u}{transform-box:fill-box;transform-origin:0% 100%;animation:wag${u} .85s ease-in-out infinite}
+.b${u}{transform-box:fill-box;transform-origin:50% 100%;animation:bob${u} 2.6s ease-in-out infinite}
+.s${u}{transform-box:fill-box;transform-origin:50% 50%;animation:twinkle${u} 2.2s ease-in-out infinite}
+.d${u}{animation:dot${u} 1.4s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.t${u},.b${u},.s${u},.d${u}{animation:none}}
+</style>
+<rect width='400' height='250' fill='#FCEBC7'/>
+<circle cx='200' cy='150' r='118' fill='#FDF3DE'/>
+<ellipse cx='200' cy='219' rx='74' ry='11' fill='#EBD6A9'/>
+<g class='b${u}'>
+  <path class='t${u}' d='M250 182 q28 -4 36 -32' stroke='${c.dark}' stroke-width='15' fill='none' stroke-linecap='round'/>
+  <ellipse cx='200' cy='190' rx='53' ry='40' fill='${c.body}'/>
+  <ellipse cx='200' cy='199' rx='31' ry='27' fill='${c.light}'/>
+  <ellipse cx='176' cy='215' rx='17' ry='10' fill='${c.light}'/>
+  <ellipse cx='224' cy='215' rx='17' ry='10' fill='${c.light}'/>
+  <ellipse cx='146' cy='152' rx='23' ry='45' fill='${c.ear}' transform='rotate(-16 146 152)'/>
+  <ellipse cx='254' cy='152' rx='23' ry='45' fill='${c.ear}' transform='rotate(16 254 152)'/>
+  <circle cx='200' cy='128' r='53' fill='${c.body}'/>
+  ${patch?`<circle cx='221' cy='119' r='21' fill='${c.dark}'/>`:""}
+  <ellipse cx='166' cy='142' rx='9' ry='6' fill='#F2A6A0' opacity='.5'/>
+  <ellipse cx='234' cy='142' rx='9' ry='6' fill='#F2A6A0' opacity='.5'/>
+  <ellipse cx='200' cy='150' rx='29' ry='21' fill='${c.light}'/>
+  <circle cx='180' cy='119' r='8' fill='#25393B'/><circle cx='183' cy='116' r='3' fill='#FFFFFF'/>
+  <circle cx='221' cy='119' r='8' fill='#25393B'/><circle cx='224' cy='116' r='3' fill='#FFFFFF'/>
+  <ellipse cx='200' cy='140' rx='9' ry='7' fill='#3A2A22'/>
+  <path d='M200 147 v5 M200 152 q-9 8 -16 1 M200 152 q9 8 16 1' stroke='#3A2A22' stroke-width='3' fill='none' stroke-linecap='round'/>
+  <ellipse cx='200' cy='163' rx='7' ry='9' fill='#EE8A93'/>
+</g>
+<g class='s${u}' style='animation-delay:.3s'><path d='M74 78 l4 10 10 4 -10 4 -4 10 -4 -10 -10 -4 10 -4 z' fill='#F4B23E'/></g>
+<g class='s${u}' style='animation-delay:1.1s'><path d='M322 96 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3 z' fill='#22808A'/></g>
+<circle class='d${u}' cx='184' cy='239' r='4' fill='#F4B23E'/>
+<circle class='d${u}' cx='200' cy='239' r='4' fill='#F4B23E' style='animation-delay:.18s'/>
+<circle class='d${u}' cx='216' cy='239' r='4' fill='#F4B23E' style='animation-delay:.36s'/>
+</svg>`;
 }
 
 function sceneSvg(scene, seed, elements){
@@ -805,7 +864,7 @@ function QuestionCard({num,q,st,onPick,isKnown,onWord}){
 }
 
 function StoryImage({prompt,photoQuery,scene,seed,elements}){
-  const [phase,setPhase]=useState("loading"); // loading | img | photo | fallback
+  const [phase,setPhase]=useState("puppy"); // puppy | img | photo | fallback
   const [photoUrl,setPhotoUrl]=useState(null);
   const [genDead,setGenDead]=useState(false); // stop waiting for the illustration
   const triedPhoto=useRef(false);
@@ -868,11 +927,13 @@ function StoryImage({prompt,photoQuery,scene,seed,elements}){
     genLoaded.current=false;
     setPhotoUrl(null);
     setGenDead(false);
-    setPhase(genUrl?"loading":"fallback");
-    if(!genUrl){ tryPhoto(); return; }
-    // Show something quickly, but do NOT unmount the illustration when we do.
-    timeoutRef.current=setTimeout(tryPhoto,IMG_PLACEHOLDER_MS);
-    giveUpRef.current=setTimeout(()=>setGenDead(true),IMG_GIVE_UP_MS);
+    if(!genUrl){ setPhase("fallback"); tryPhoto(); return; }
+    // Puppy is on screen from the first frame. No timer, no stock photo.
+    setPhase("puppy");
+    // If the illustration never arrives, fall through to the topical photo
+    // and then the scene drawing, rather than leaving a puppy on a story
+    // about a lighthouse.
+    giveUpRef.current=setTimeout(()=>{ setGenDead(true); tryPhoto(); },IMG_GIVE_UP_MS);
     return clearTimers;
     // eslint-disable-next-line
   },[genUrl,photoQuery]);
@@ -897,7 +958,12 @@ function StoryImage({prompt,photoQuery,scene,seed,elements}){
         <div style={{position:"absolute",inset:0,zIndex:1}}
           dangerouslySetInnerHTML={{__html:sceneSvg(fbScene,seed,elements)}}/>
       )}
-      {phase==="loading"&&<div className="skel" style={{position:"absolute",inset:0,zIndex:0}}/>}
+      {/* Stays mounted through the .4s cross-fade so there is no blank flash
+          between the puppy leaving and the illustration becoming opaque. */}
+      {(phase==="puppy"||phase==="img")&&(
+        <div style={{position:"absolute",inset:0,zIndex:0}}
+          dangerouslySetInnerHTML={{__html:puppySvg(seed)}}/>
+      )}
     </div>
   );
 }
