@@ -64,10 +64,12 @@ const ALLOWED_ORIGIN = "https://ikarus-eth.github.io";
 /* ---- illustration settings. Change these, redeploy, done. ----
    Cost per image at 1536x1024, from OpenAI's pricing table:
      low $0.005   medium $0.041   high $0.165
-   Start on medium. Try low for a story and compare — for flat
-   picture-book art it is often indistinguishable and 8x cheaper. */
+   Currently on low: $0.03 for a 6-chapter story. Low is also visibly
+   faster than medium, which matters here because the app shows a
+   placeholder until the illustration lands. Generate one story at
+   medium and compare before deciding this is the right setting. */
 const IMAGE_MODEL       = "gpt-image-2";
-const IMAGE_QUALITY     = "medium";       // "low" | "medium" | "high"
+const IMAGE_QUALITY     = "low";          // "low" | "medium" | "high"
 const IMAGE_SIZE        = "1536x1024";    // landscape; app displays it at 832x520
 const IMAGE_FORMAT      = "webp";         // smaller than png = less Worker CPU
 const IMAGE_COMPRESSION = 80;

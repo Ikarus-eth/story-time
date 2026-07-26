@@ -1,0 +1,28 @@
+{
+  // Tells Workers Builds what to deploy when a commit lands on main.
+  // Build command is None; wrangler bundles worker/worker.js itself.
+  //
+  // THREE THINGS HERE MATTER, DO NOT CHANGE THEM CASUALLY:
+  //
+  // "name" must stay exactly "story-time-proxy". It is what decides which
+  // Worker gets overwritten. Rename it and Cloudflare creates a SECOND
+  // Worker on a different URL, the app keeps calling the old one, and
+  // nothing you deploy appears to take effect.
+  //
+  // "keep_vars" stops a deploy from wiping plain-text variables set in the
+  // dashboard. Encrypted Secrets are never touched by a deploy either way,
+  // but plain-text vars are, and this is the guard against that.
+  //
+  // "observability" is set explicitly so deploying from Git cannot silently
+  // switch off the logs. Those logs are the only way to see whether an
+  // illustration came from OpenAI or fell back to pollinations.
+
+  "name": "story-time-proxy",
+  "main": "worker/worker.js",
+  "compatibility_date": "2026-07-01",
+  "workers_dev": true,
+  "keep_vars": true,
+  "observability": {
+    "enabled": true
+  }
+}
