@@ -1490,6 +1490,7 @@ export default function App(){
   const activeMs=useRef(0);
   const readWords=useRef(0);
   const sessionsRef=useRef([]);
+  const practiceCovered=useRef(new Set());
   const reviewsRef=useRef([]);
   const wakeRef=useRef(null);        // screen wake lock while a generation is running
   const chapterBusy=useRef(false);   // guards continueChapter against a double tap
@@ -1505,6 +1506,8 @@ export default function App(){
   }
 
   const knownCount=Object.keys(vocab).length;
+
+  const dueCount=useMemo(()=>{ const n=Date.now(); return Object.values(vocab).filter(e=>e.due<=n).length; },[vocab]);
 
   /* ---- word matching (lemma + inflected forms + multiple senses) ---- */
   const vocabIndex=useMemo(()=>{
@@ -2223,6 +2226,30 @@ export default function App(){
     setScreen("cards");
   }
 
+  /* Practice on demand, from the home screen, independent of any story.
+     Words that are due come first, oldest first. If that is fewer than ten,
+     the weakest words are topped up behind them, so there is always
+     something to practise even on a day with nothing due - reviewing early
+     costs a little efficiency but never blocks her. */
+  const PRACTICE_BATCH=10;
+  function practicePool(){
+    const now=Date.now();
+    const covered=practiceCovered.current;
+    const all=Object.entries(vocab).filter(en=>!covered.has(en[0]));
+    const due=all.filter(en=>en[1].due<=now).sort((a,b)=>a[1].due-b[1].due);
+    const rest=all.filter(en=>en[1].due>now).sort((a,b)=>((a[1].s||0)-(b[1].s||0)));
+    return [...due,...rest];
+  }
+  function startPractice(){
+    const pool=practicePool();
+    if(!pool.length){ setCards(null); setStats(null); setScreen("done"); return; }
+    const pick=pool.slice(0,PRACTICE_BATCH).map(en=>en[0]);
+    pick.forEach(k=>practiceCovered.current.add(k));
+    setStats(null);
+    setCards({q:pick.map(k=>({key:k,mode:modeFor(vocab[k])})),i:0,right:0,graded:0,standalone:true});
+    setScreen("cards");
+  }
+
   /* Three or four plausible wrong answers, preferring other words she knows
      over words pulled from nowhere. */
   function optionsFor(key){
@@ -2270,6 +2297,7 @@ export default function App(){
 
   function goHome(){
     abortAllRequests();
+    practiceCovered.current=new Set();
     reqRef.current++;
     setStory(null); setAnswers({}); setHl(null); setPopup(null);
     setCards(null); setStats(null); setCh2(false); setConfirmDel(null);
@@ -2411,8 +2439,18 @@ export default function App(){
               </div>
             )}
 
-            <button className="btn btn-ghost" style={{width:"100%",marginTop:26}} onClick={()=>{setConfirmDel(null);setScreen("words");}}>
+            {knownCount>0&&(
+              <button className="btn btn-pri" style={{width:"100%",marginTop:26}}
+                onClick={()=>{ practiceCovered.current=new Set(); startPractice(); }}>
+                Practice my words 🧠 {dueCount>0?"("+dueCount+" ready)":""}
+              </button>
+            )}
+            <button className="btn btn-ghost" style={{width:"100%",marginTop:10}} onClick={()=>{setConfirmDel(null);setScreen("words");}}>
               My words 📒 {knownCount>0?"("+knownCount+")":""}
+            </button>
+            <button className="btn btn-plain" style={{width:"100%",marginTop:10,opacity:.75}}
+              onClick={()=>setDash(true)}>
+              For parents 📊
             </button>
           </div>
         )}
@@ -2639,11 +2677,24 @@ export default function App(){
                 <div style={{padding:"6px 0",fontSize:17}}>🧠 <b>{cards.right}</b> of <b>{cards.graded}</b> word exercises right</div>
               )}
               {!cards&&(
-                <div style={{padding:"6px 0",fontSize:14,color:"var(--muted)"}}>No word cards today. Your words will be ready to practice soon!</div>
+                <div style={{padding:"6px 0",fontSize:14,color:"var(--muted)"}}>
+                  {knownCount>0?"You have practised every word in your book. Well done!":"No word cards yet - read a story and tap the words you don't know."}
+                </div>
+              )}
+              {cards&&cards.q.length>0&&practicePool().length===0&&knownCount>0&&(
+                <div style={{padding:"6px 0",fontSize:14,color:"var(--muted)"}}>
+                  That was the last one - you have practised every word in your book. Well done!
+                </div>
               )}
             </div>
-            <button className="btn btn-pri" style={{width:"100%",maxWidth:420,marginTop:24}} onClick={goHome}>
-              Read another story
+            {practicePool().length>0&&(
+              <button className="btn btn-pri" style={{width:"100%",maxWidth:420,marginTop:24}} onClick={startPractice}>
+                Practice {Math.min(PRACTICE_BATCH,practicePool().length)} more words 🧠
+              </button>
+            )}
+            <button className={practicePool().length>0?"btn btn-ghost":"btn btn-pri"}
+              style={{width:"100%",maxWidth:420,marginTop:10}} onClick={goHome}>
+              {cards&&cards.standalone?"Back home":"Read another story"}
             </button>
           </div>
         )}
