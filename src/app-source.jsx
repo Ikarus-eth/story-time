@@ -140,8 +140,6 @@ const TOPICS = [
   { id: "friends", label: "Friends & Everyday Life", emoji: "🏡", tint: "tint-f" },
   { id: "history", label: "History", emoji: "🏺", tint: "tint-h" },
 ];
-const TOPIC_SCENE = { animals: "forest", friends: "garden", history: "castle", custom: "forest" };
-const SCENES = ["forest","sea","garden","school","desert","castle","ship","night"];
 
 const SEEDS = {
   animals: [
@@ -525,9 +523,9 @@ function factPrompt(o){
     recycleLine(o.recycle),
     o.avoid&&o.avoid.length ? `Do NOT reuse these earlier ideas: ${o.avoid.join(" | ")}.` : "",
     `Create exactly ${L.fact.q} multiple-choice comprehension questions in simple English about THIS text. ${Q_RULES}`,
-    `Also include "image_prompt": one vivid, concrete English sentence for an illustrator - exactly what the main character is doing, where, and the mood, specific enough to draw, not vague. Also include "scene": the closest match from this list: ${SCENES.join(", ")}. Also include "photo_query": 2-4 simple English keywords for finding a REAL PHOTO of the general setting or subject (not the specific plot), for example "red fox forest" or "medieval castle" or "ocean waves dolphins". Also include "visual_elements": 1-3 single concrete nouns for the most important characters or objects (e.g. ["fox","treasure chest"] or ["rabbit","owl"]), used to pick simple illustration icons. Also include "tricky_words": 8-12 single words copied exactly from your text that a German child at this level might not know (no names).`,
+    `Also include "image_prompt": one vivid, concrete English sentence for an illustrator - exactly what the main character is doing, where, and the mood, specific enough to draw, not vague. Also include "tricky_words": 8-12 single words copied exactly from your text that a German child at this level might not know (no names).`,
     `Reply with ONLY one single-line JSON object, nothing else. No markdown. No line breaks anywhere:`,
-    `{"title":"...","sections":["paragraph 1","paragraph 2"],"image_prompt":"...","scene":"forest","photo_query":"...","visual_elements":["...","..."],"tricky_words":["...","..."],"questions":[{"q":"...","options":["...","...","...","..."],"correct":0,"section":0,"evidence":"..."}]}`
+    `{"title":"...","sections":["paragraph 1","paragraph 2"],"image_prompt":"...","tricky_words":["...","..."],"questions":[{"q":"...","options":["...","...","...","..."],"correct":0,"section":0,"evidence":"..."}]}`
   ];
   return lines.filter(Boolean).join("\n");
 }
@@ -544,9 +542,9 @@ function chapterOnePrompt(o){
     o.avoid&&o.avoid.length ? `Do NOT reuse these earlier ideas: ${o.avoid.join(" | ")}.` : "",
     `Also include "summary": one or two English sentences summing up chapter 1, for reference when writing the next chapter.`,
     `Create exactly ${L.ch.q} multiple-choice comprehension questions in simple English about THIS chapter. ${Q_RULES}`,
-    `Also include "image_prompt": one vivid, concrete English sentence for an illustrator - exactly what the main character is doing, where, and the mood in THIS chapter, specific enough to draw, not vague. Also include "scene": closest match from: ${SCENES.join(", ")}. Also include "photo_query": 2-4 simple English keywords for a REAL PHOTO of the general setting or subject. Also include "visual_elements": 1-3 single concrete nouns for the most important characters or objects in this chapter. Also include "tricky_words": 6-10 single words copied exactly from THIS chapter's text that a German child at this level might not know (no names).`,
+    `Also include "image_prompt": one vivid, concrete English sentence for an illustrator - exactly what the main character is doing, where, and the mood in THIS chapter, specific enough to draw, not vague. Also include "tricky_words": 6-10 single words copied exactly from THIS chapter's text that a German child at this level might not know (no names).`,
     `Reply with ONLY one single-line JSON object, nothing else. No markdown. No line breaks anywhere:`,
-    `{"title":"...","sections":["paragraph 1","paragraph 2"],"summary":"...","image_prompt":"...","scene":"forest","photo_query":"...","visual_elements":["...","..."],"tricky_words":["...","..."],"questions":[{"q":"...","options":["...","...","...","..."],"correct":0,"section":0,"evidence":"..."}]}`
+    `{"title":"...","sections":["paragraph 1","paragraph 2"],"summary":"...","image_prompt":"...","tricky_words":["...","..."],"questions":[{"q":"...","options":["...","...","...","..."],"correct":0,"section":0,"evidence":"..."}]}`
   ];
   return lines.filter(Boolean).join("\n");
 }
@@ -565,9 +563,9 @@ function nextChapterPrompt(o){
     recycleLine(o.recycle),
     `Also include "summary": one or two English sentences summing up EVERYTHING so far including this chapter, for reference when writing the next chapter.`,
     `Create exactly ${L.ch.q} multiple-choice comprehension questions about THIS chapter only. ${Q_RULES}`,
-    `Also include "image_prompt": one vivid, concrete English sentence for an illustrator - exactly what the main character is doing, where, and the mood in THIS chapter, specific enough to draw, not vague. Also include "scene": closest match from: ${SCENES.join(", ")}. Also include "photo_query": 2-4 simple English keywords for a REAL PHOTO of the general setting or subject. Also include "visual_elements": 1-3 single concrete nouns for the most important characters or objects in this chapter.`,
+    `Also include "image_prompt": one vivid, concrete English sentence for an illustrator - exactly what the main character is doing, where, and the mood in THIS chapter, specific enough to draw, not vague.`,
     `Reply with ONLY one single-line JSON object, no markdown, no line breaks:`,
-    `{"sections":["paragraph 1","paragraph 2"],"summary":"...","image_prompt":"...","scene":"forest","photo_query":"...","visual_elements":["...","..."],"questions":[{"q":"...","options":["...","...","...","..."],"correct":0,"section":0,"evidence":"..."}]}`,
+    `{"sections":["paragraph 1","paragraph 2"],"summary":"...","image_prompt":"...","questions":[{"q":"...","options":["...","...","...","..."],"correct":0,"section":0,"evidence":"..."}]}`,
     `"section" = index (0-based) of the paragraph WITHIN THIS chapter (starting at 0) where the answer is found.`
   ];
   return lines.filter(Boolean).join("\n");
@@ -1516,7 +1514,7 @@ export default function App(){
       topic:entry.topic, title:entry.title,
       sections:entry.sections, questions:entry.questions,
       chapterEnds:entry.chapterEnds||[entry.sections.length-1],
-      chapterImages:entry.chapterImages||[{prompt:"",photoQuery:"",elements:[],scene:"forest",seed:1}],
+      chapterImages:entry.chapterImages||[{prompt:"",seed:1}],
       isFact:!!entry.isFact,
       wish:entry.wish, summary:"", steerWish:"",
       validated:true, replay:true, libId:entry.id
@@ -1562,9 +1560,6 @@ export default function App(){
       if(!j.title||secs.length<2||qsRaw.length===0) throw new Error("bad data");
       const img={
         prompt:String(j.image_prompt||("a scene from a children's story about "+seed)),
-        photoQuery:String(j.photo_query||seed).slice(0,60),
-        elements:(Array.isArray(j.visual_elements)?j.visual_elements:[]).map(String).slice(0,3),
-        scene:SCENES.includes(j.scene)?j.scene:(TOPIC_SCENE[topicId]||"forest"),
         seed:hash(String(j.title))
       };
       const st={
@@ -1637,9 +1632,6 @@ export default function App(){
       if(reqRef.current!==rid) return;
       const img={
         prompt:String(j.image_prompt||"a new scene from the story"),
-        photoQuery:String(j.photo_query||"").slice(0,60),
-        elements:(Array.isArray(j.visual_elements)?j.visual_elements:[]).map(String).slice(0,3),
-        scene:SCENES.includes(j.scene)?j.scene:"forest",
         seed:hash(String(story.title)+chapterNum)
       };
       setStory(cur=>{
