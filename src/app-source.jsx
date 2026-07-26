@@ -546,20 +546,55 @@ function castEntryLine(c){
   const kind=(CAST_KINDS.find(k=>k.id===c.kind)||{}).label||"Character";
   return `- ${c.name} (${kind.toLowerCase()}): ${String(c.desc||"").replace(/\s+/g," ").trim()}`;
 }
-/* The hero always; up to CAST_EXTRAS of the rest, chosen fresh each story. */
-function pickCast(cast){
-  const on=(cast||[]).filter(c=>c.include!==false&&c.name&&c.desc);
-  const hero=on.filter(c=>c.kind==="me");
-  const rest=shuffle(on.filter(c=>c.kind!=="me")).slice(0,Math.floor(Math.random()*(CAST_EXTRAS+1)));
-  return [...hero,...rest];
+/* Anyone she names in her own words is in the story, whether or not the dice
+   would have chosen them. Typing "Mausie and I go to the mountains" has to
+   produce Mausie the white cat, not some cat the model made up. Naming also
+   overrides the "can turn up in my stories" switch: asking for someone by
+   name is a clearer signal than a toggle she set weeks ago. */
+function castNamedIn(cast,text){
+  const t=String(text||"");
+  if(!t.trim()) return [];
+  return (cast||[]).filter(c=>{
+    if(!c.name||!c.desc) return false;
+    const n=String(c.name).trim();
+    if(!n) return false;
+    try{ return new RegExp("\\b"+escReg(n)+"\\b","i").test(t); }
+    catch(e){ return t.toLowerCase().indexOf(n.toLowerCase())>=0; }
+  });
+}
+/* The hero, anyone she named, then up to CAST_EXTRAS more at random. */
+function pickCast(cast,wish){
+  const all=(cast||[]).filter(c=>c.name&&c.desc);
+  const on=all.filter(c=>c.include!==false);
+  const named=castNamedIn(all,wish).slice(0,4);
+  const namedIds=new Set(named.map(c=>c.id));
+  const out=[];
+  const seen=new Set();
+  const push=(c,required)=>{
+    if(!c||seen.has(c.id)) return;
+    seen.add(c.id); out.push({...c,required:!!required});
+  };
+  named.forEach(c=>push(c,true));
+  on.filter(c=>c.kind==="me").forEach(c=>push(c,false));
+  shuffle(on.filter(c=>c.kind!=="me"&&!namedIds.has(c.id)))
+    .slice(0,Math.floor(Math.random()*(CAST_EXTRAS+1)))
+    .forEach(c=>push(c,false));
+  return out;
 }
 function castLine(picked){
   if(!picked||!picked.length) return "";
-  return [
-    `REAL FACTS about the reader's own world. Every line below is TRUE:`,
-    picked.map(castEntryLine).join("\n"),
-    `You may build these into the story or leave them out entirely - do not force them in, and do not list them. But if one of them appears, every detail above about it must be correct. Never contradict a fact, and never invent a conflicting one (for example never change a described colour). Use the names exactly as written.`,
-  ].join("\n");
+  const req=picked.filter(c=>c.required), opt=picked.filter(c=>!c.required);
+  const out=[`REAL FACTS about the reader's own world. Every line below is TRUE:`];
+  if(req.length){
+    out.push(req.map(castEntryLine).join("\n"));
+    out.push(`The reader asked for ${req.map(c=>c.name).join(" and ")} by name, so ${req.length>1?"they":"that one"} MUST be in the story, as ${req.length>1?"themselves":"itself"} - not renamed, not replaced by something similar.`);
+  }
+  if(opt.length){
+    out.push(opt.map(castEntryLine).join("\n"));
+    out.push(`You may build ${req.length?"these others":"these"} into the story or leave them out entirely - do not force them in, and do not list them.`);
+  }
+  out.push(`Whenever any of them appears, every detail above about it must be correct. Never contradict a fact, and never invent a conflicting one (for example never change a described colour). Use the names exactly as written.`);
+  return out.join("\n");
 }
 /* Appended to the illustration prompt so the picture agrees with the text. */
 function castLook(picked){
@@ -1712,7 +1747,7 @@ export default function App(){
     const avoid = prog.topics.filter(x=>x.t===topicId).slice(0,8).map(x=>x.title);
     // Chosen once per story, so a character who appears in chapter 1 is still
     // around in chapter 4 rather than being re-rolled every chapter.
-    const cast = pickCast(world.cast);
+    const cast = pickCast(world.cast, w);
     const p = isFact
       ? factPrompt({topicLabel,L,seed,wish:topicId==="custom"?"":w,recycle,avoid,cast})
       : chapterOnePrompt({topicLabel,L,seed,wish:topicId==="custom"?"":w,recycle,avoid,cast});
@@ -1784,10 +1819,12 @@ export default function App(){
     try{
       const L=LEVELS[prog.level]||LEVELS[2];
       const recycle=recycleWords(4);
+      // Naming someone in "what happens next" brings them in mid-story, and
+      // keeps them for the chapters after this one.
+      const chCast=mergeCast(story.cast||[], castNamedIn(world.cast, steer));
       const j=await askJson(nextChapterPrompt({
         L, title:story.title, summary:story.summary||story.title,
-        chapterNum, isFinal, wish:story.wish, steerWish:steer, recycle,
-        cast:story.cast||[]
+        chapterNum, isFinal, wish:story.wish, steerWish:steer, recycle, cast:chCast
       }));
       if(reqRef.current!==rid) return;
       const secs=(Array.isArray(j.sections)?j.sections:[]).map(x=>String(x).trim()).filter(Boolean);
@@ -1798,7 +1835,7 @@ export default function App(){
       if(reqRef.current!==rid) return;
       const img={
         prompt:String(j.image_prompt||"a new scene from the story"),
-        look:castLook(story.cast||[]),
+        look:castLook(chCast),
         seed:hash(String(story.title)+chapterNum)
       };
       setStory(cur=>{
@@ -1808,7 +1845,7 @@ export default function App(){
         const chIdx=cur.chapterEnds.length;
         const added=qs.map(q=>({...q,section:q.section+off,chapter:chIdx,after:allSecs.length-1}));
         const ns={
-          ...cur, sections:allSecs,
+          ...cur, cast:chCast, sections:allSecs,
           chapterEnds:[...cur.chapterEnds,allSecs.length-1],
           chapterImages:[...cur.chapterImages,img],
           questions:[...cur.questions,...added],
@@ -2134,6 +2171,12 @@ export default function App(){
   }
 
   /* ---- Juna's world ---- */
+  function mergeCast(current,extra){
+    const out=[...current];
+    const seen=new Set(current.map(c=>c.id));
+    (extra||[]).forEach(c=>{ if(!seen.has(c.id)){ seen.add(c.id); out.push({...c,required:true}); } });
+    return out;
+  }
   function saveWorld(cast){
     const w={cast:cast.slice(0,CAST_MAX)};
     setWorld(w); sSet("world",w);
