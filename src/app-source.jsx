@@ -119,14 +119,14 @@ const IMAGE_URL = (typeof window!=="undefined"&&window.APP_CONFIG&&window.APP_CO
 /* Optional: a short physical description of the reader, appended to every image
    prompt so her look stays consistent chapter to chapter. Never guessed. */
 const CHARACTER_LOOK = (typeof window!=="undefined"&&window.APP_CONFIG&&window.APP_CONFIG.CHARACTER_LOOK)||"";
-/* Real-photo fallback tier (Openverse, keyless) between the AI illustration and the
-   hand-drawn SVG scene. Set to false to disable and go straight to SVG on failure. */
-const ENABLE_PHOTO_FALLBACK = true;
+/* The one painted picture used whenever a story illustration is unavailable:
+   while it is being drawn, and permanently if drawing fails. Deliberately a
+   single real illustration rather than a stock photo or a generated vector
+   scene - those looked like an error state, which is what they were. */
+const FALLBACK_IMG = "img/story-fallback.webp";
 /* Illustration timing. The Worker draws with gpt-image-2, which takes 20-60s.
-   While it draws, a drawn puppy fills the frame (see puppySvg). The Openverse
-   photo tier is no longer used as the everyday placeholder - it only appears
-   if the illustration genuinely fails or never arrives, because a real photo
-   is at least topical, whereas the puppy is not. */
+   While it draws, FALLBACK_IMG fills the frame with three pulsing dots over
+   it, and the illustration cross-fades in on top when it arrives. */
 const IMG_GIVE_UP_MS = 105000;      // stop waiting for the illustration after this
 /* The reader's own name - cast as the story's hero by default. */
 const READER_NAME = "Juna";
@@ -306,6 +306,12 @@ textarea.input{resize:none;line-height:1.5}
   box-shadow:0 -8px 30px rgba(20,40,42,.2);animation:up .25s ease-out}
 .de-box{background:var(--lilac);border-radius:14px;padding:12px 14px;margin-top:14px}
 /* ---- word practice ---- */
+.drawing{position:absolute;left:0;right:0;bottom:12px;z-index:1;display:flex;
+  justify-content:center;gap:7px;pointer-events:none}
+.drawing i{width:8px;height:8px;border-radius:99px;background:#fff;display:block;
+  box-shadow:0 1px 4px rgba(20,40,42,.45);animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{0%,75%,100%{opacity:.35}35%{opacity:1}}
+@media (prefers-reduced-motion:reduce){.drawing i{animation:none}}
 .pill{display:inline-block;font-size:11px;font-weight:800;letter-spacing:1.2px;
   color:#8A6B12;background:var(--honey-soft);border-radius:99px;padding:5px 11px;margin-bottom:12px}
 .wimg{position:relative;width:100%;aspect-ratio:16/10;border-radius:16px;overflow:hidden;
@@ -345,268 +351,6 @@ textarea.input{resize:none;line-height:1.5}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 `;
 
-/* ---------------- hand-crafted scene art (image fallback) ---------------- */
-const INK = "#4A3728";
-
-function cloud(x,y,s,c){
-  c=c||"#FFFFFF";
-  return `<g fill='${c}' opacity='0.92'>`
-    +`<ellipse cx='${x}' cy='${y}' rx='${20*s}' ry='${11*s}'/>`
-    +`<ellipse cx='${x+16*s}' cy='${y+3*s}' rx='${13*s}' ry='${9*s}'/>`
-    +`<ellipse cx='${x-15*s}' cy='${y+4*s}' rx='${12*s}' ry='${8*s}'/>`
-    +`<ellipse cx='${x+3*s}' cy='${y-7*s}' rx='${11*s}' ry='${8*s}'/>`
-    +`</g>`;
-}
-function tree(x,y,s,leaf,leaf2,trunk){
-  leaf2=leaf2||leaf;
-  return `<path d='M${x-3*s} ${y} L${x-2*s} ${y-18*s} L${x+2*s} ${y-18*s} L${x+3*s} ${y} Z' fill='${trunk}'/>`
-    +`<path d='M${x} ${y-46*s} C${x-20*s} ${y-46*s} ${x-22*s} ${y-24*s} ${x-10*s} ${y-18*s} C${x-20*s} ${y-14*s} ${x-16*s} ${y+3*s} ${x} ${y-3*s} C${x+16*s} ${y+3*s} ${x+20*s} ${y-14*s} ${x+10*s} ${y-18*s} C${x+22*s} ${y-24*s} ${x+20*s} ${y-46*s} ${x} ${y-46*s} Z' fill='${leaf}'/>`
-    +`<ellipse cx='${x-7*s}' cy='${y-31*s}' rx='${9*s}' ry='${7*s}' fill='${leaf2}' opacity='0.5'/>`;
-}
-function hill(y,h,c){
-  return `<path d='M0 ${y} Q100 ${y-h} 200 ${y} T400 ${y} L400 250 L0 250 Z' fill='${c}'/>`;
-}
-function sunGlow(id,x,y,r,c){
-  return `<radialGradient id='${id}' cx='50%' cy='50%' r='50%'>`
-    +`<stop offset='0%' stop-color='${c}'/><stop offset='55%' stop-color='${c}'/><stop offset='100%' stop-color='${c}' stop-opacity='0'/>`
-    +`</radialGradient><circle cx='${x}' cy='${y}' r='${r*2.6}' fill='url(#${id})'/><circle cx='${x}' cy='${y}' r='${r}' fill='${c}'/>`;
-}
-function flower(x,y,c){
-  let petals="";
-  [0,72,144,216,288].forEach(a=>{
-    const r=a*Math.PI/180, px=x+Math.cos(r)*3.4, py=y+Math.sin(r)*3.4;
-    petals+=`<ellipse cx='${px.toFixed(1)}' cy='${py.toFixed(1)}' rx='2.6' ry='1.7' transform='rotate(${a} ${px.toFixed(1)} ${py.toFixed(1)})' fill='${c}'/>`;
-  });
-  return `<path d='M${x} ${y+2} Q${x-2} ${y+8} ${x} ${y+12}' stroke='#5F9E5B' stroke-width='2' fill='none' stroke-linecap='round'/>`
-    +petals+`<circle cx='${x}' cy='${y}' r='1.8' fill='#FFF3D0'/>`;
-}
-function birdV(x,y,c){
-  return `<path d='M${x-8} ${y} Q${x-3} ${y-6} ${x} ${y} Q${x+3} ${y-6} ${x+8} ${y}' stroke='${c}' stroke-width='2.2' fill='none' stroke-linecap='round'/>`;
-}
-function windowBox(x,y,w,h,c){
-  return `<rect x='${x}' y='${y}' width='${w}' height='${h}' rx='3' fill='${c}'/>`
-    +`<line x1='${x+w/2}' y1='${y}' x2='${x+w/2}' y2='${y+h}' stroke='#FFFFFF' stroke-width='1.6'/>`
-    +`<line x1='${x}' y1='${y+h/2}' x2='${x+w}' y2='${y+h/2}' stroke='#FFFFFF' stroke-width='1.6'/>`;
-}
-
-/* story-relevant prop silhouettes, composited on top of a backdrop when the
-   story mentions them (see PROPS keys, matched against j.visual_elements) */
-const PROPS = {
-  fox:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<path d='M-15 6 Q-17 -12 0 -14 Q17 -12 15 6 Q15 17 0 19 Q-15 17 -15 6 Z' fill='#E1793D'/>`
-    +`<path d='M-6 7 Q0 14 6 7 Q6 0 0 1 Q-6 0 -6 7 Z' fill='#FFF6EA'/>`
-    +`<path d='M-13 -11 L-19 -25 L-5 -15 Z' fill='#E1793D'/><path d='M13 -11 L19 -25 L5 -15 Z' fill='#E1793D'/>`
-    +`<path d='M-10 -12 L-14 -20 L-7 -14 Z' fill='#FFF6EA'/><path d='M10 -12 L14 -20 L7 -14 Z' fill='#FFF6EA'/>`
-    +`<path d='M13 7 Q30 4 31 -10 Q32 -20 23 -17 Q27 -8 21 1 Q17 8 13 7 Z' fill='#E1793D'/><ellipse cx='25' cy='-13' rx='4' ry='6' fill='#FFF6EA'/>`
-    +`<circle cx='0' cy='-1' r='1.6' fill='${INK}'/></g>`,
-  rabbit:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<ellipse cx='0' cy='8' rx='13' ry='11' fill='#F3EDE3'/><ellipse cx='0' cy='-8' rx='9' ry='8' fill='#F3EDE3'/>`
-    +`<path d='M-6 -16 Q-9 -34 -4 -36 Q0 -34 -1 -15 Z' fill='#F3EDE3'/><path d='M6 -16 Q9 -34 4 -36 Q0 -34 1 -15 Z' fill='#F3EDE3'/>`
-    +`<path d='M-5 -16 Q-6 -28 -3 -30 Q0 -28 -1 -15 Z' fill='#F6C9CE'/><path d='M5 -16 Q6 -28 3 -30 Q0 -28 1 -15 Z' fill='#F6C9CE'/>`
-    +`<circle cx='-3' cy='-8' r='1.4' fill='${INK}'/><circle cx='3' cy='-8' r='1.4' fill='${INK}'/><circle cx='11' cy='9' r='4' fill='#FFFFFF'/></g>`,
-  hedgehog:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<path d='M-16 6 Q-16 -10 0 -12 Q16 -10 16 6 Q16 14 0 15 Q-16 14 -16 6 Z' fill='#8A7159'/>`
-    +[[-10,-6],[-4,-11],[3,-12],[10,-8],[13,-1],[-13,-2]].map(p=>`<path d='M${p[0]} ${p[1]} l4 -7 l3 8 Z' fill='#6E5943'/>`).join("")
-    +`<ellipse cx='-11' cy='5' rx='6' ry='5' fill='#F3EDE3'/><circle cx='-15' cy='3' r='1.4' fill='${INK}'/></g>`,
-  owl:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<path d='M0 -20 Q-14 -20 -14 -2 Q-14 14 0 16 Q14 14 14 -2 Q14 -20 0 -20 Z' fill='#8A6A4E'/>`
-    +`<path d='M-8 -20 L-12 -28 L-3 -21 Z' fill='#8A6A4E'/><path d='M8 -20 L12 -28 L3 -21 Z' fill='#8A6A4E'/>`
-    +`<circle cx='-6' cy='-6' r='5.5' fill='#FFF6EA'/><circle cx='6' cy='-6' r='5.5' fill='#FFF6EA'/>`
-    +`<circle cx='-6' cy='-6' r='2.4' fill='${INK}'/><circle cx='6' cy='-6' r='2.4' fill='${INK}'/><path d='M0 -4 L-3 1 L3 1 Z' fill='#E1953D'/></g>`,
-  squirrel:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<path d='M6 10 Q-8 10 -8 -2 Q-8 -12 3 -12 Q13 -12 12 -1 Q16 3 6 10 Z' fill='#C4703A'/>`
-    +`<path d='M8 -2 Q26 -6 24 -24 Q22 -34 14 -28 Q22 -22 16 -10 Q22 -6 8 -2 Z' fill='#C4703A'/>`
-    +`<path d='M-9 -8 L-14 -16 L-4 -13 Z' fill='#C4703A'/><circle cx='-2' cy='-8' r='1.4' fill='${INK}'/><ellipse cx='-1' cy='2' rx='5' ry='4' fill='#F3EDE3'/></g>`,
-  fish:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<ellipse cx='0' cy='0' rx='14' ry='8' fill='#4FA8C7'/><path d='M13 0 L23 -7 L23 7 Z' fill='#3A8AA6'/>`
-    +`<circle cx='-7' cy='-1' r='1.4' fill='#1F2A3E'/><path d='M-3 -7 Q0 -10 3 -7' stroke='#DDEEF0' stroke-width='1.6' fill='none'/></g>`,
-  boat:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<path d='M-20 0 L20 0 L14 10 L-14 10 Z' fill='#8A5A38'/><rect x='-1' y='-26' width='2' height='26' fill='#6E4327'/>`
-    +`<path d='M1 -24 L18 -6 L1 -6 Z' fill='#FFF6EA'/><path d='M-1 -20 L-14 -6 L-1 -6 Z' fill='#F4B23E'/></g>`,
-  chest:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<rect x='-16' y='-2' width='32' height='18' rx='2' fill='#8A5A38'/><path d='M-16 -2 Q0 -16 16 -2 Z' fill='#A6714A'/>`
-    +`<rect x='-16' y='-2' width='32' height='4' fill='#E1B15A'/><rect x='-2.5' y='-2' width='5' height='10' fill='#E1B15A'/></g>`,
-  book:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<path d='M0 -10 Q-16 -16 -18 -6 Q-16 8 0 6 Z' fill='#C8564A'/><path d='M0 -10 Q16 -16 18 -6 Q16 8 0 6 Z' fill='#E1793D'/><path d='M0 -10 L0 6' stroke='#8A3B31' stroke-width='1.4'/></g>`,
-  flag:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<rect x='-1' y='-30' width='2' height='34' fill='#8A6242'/><path d='M1 -30 L22 -23 L1 -16 Z' fill='#C8564A'/></g>`,
-  horse:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<path d='M-14 12 Q-16 -6 -2 -8 L6 -8 Q10 -20 18 -18 Q14 -12 14 -6 Q18 -2 14 4 Q16 10 8 12 Q0 14 -14 12 Z' fill='#8A6242'/>`
-    +`<path d='M4 -8 Q-2 -18 -8 -16 Q-4 -10 -4 -6 Z' fill='#5F4530'/><rect x='-12' y='10' width='3' height='10' fill='#8A6242'/><rect x='4' y='10' width='3' height='10' fill='#8A6242'/></g>`,
-  star:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<path d='M0 -11 L3 -3 L11 -3 L4.5 2 L7 10 L0 5 L-7 10 L-4.5 2 L-11 -3 L-3 -3 Z' fill='#FBEFC0'/></g>`,
-  butterfly:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<ellipse cx='-7' cy='-4' rx='7' ry='9' fill='#9B7FD4'/><ellipse cx='7' cy='-4' rx='7' ry='9' fill='#B79AE8'/>`
-    +`<ellipse cx='-6' cy='7' rx='5' ry='6' fill='#B79AE8'/><ellipse cx='6' cy='7' rx='5' ry='6' fill='#9B7FD4'/><rect x='-1' y='-10' width='2' height='20' rx='1' fill='${INK}'/></g>`,
-  bee:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<ellipse cx='0' cy='0' rx='9' ry='7' fill='#F4B23E'/><path d='M-9 0 L9 0' stroke='${INK}' stroke-width='2'/><path d='M-5 -6 L-5 6 M5 -6 L5 6' stroke='${INK}' stroke-width='2'/>`
-    +`<ellipse cx='-4' cy='-9' rx='6' ry='4' fill='#DDEEF0' opacity='0.8'/><ellipse cx='4' cy='-9' rx='6' ry='4' fill='#DDEEF0' opacity='0.8'/></g>`,
-  cat:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<path d='M-13 8 Q-15 -8 0 -10 Q15 -8 13 8 Q13 16 0 17 Q-13 16 -13 8 Z' fill='#4A4A52'/>`
-    +`<path d='M-10 -9 L-15 -20 L-3 -12 Z' fill='#4A4A52'/><path d='M10 -9 L15 -20 L3 -12 Z' fill='#4A4A52'/>`
-    +`<path d='M13 5 Q26 8 24 -6' stroke='#4A4A52' stroke-width='4' fill='none' stroke-linecap='round'/><circle cx='-4' cy='-2' r='1.3' fill='#DDEEF0'/><circle cx='4' cy='-2' r='1.3' fill='#DDEEF0'/></g>`,
-  dog:(x,y,s)=>`<g transform='translate(${x} ${y}) scale(${s})'>`
-    +`<path d='M-13 8 Q-15 -8 0 -10 Q15 -8 13 8 Q13 16 0 17 Q-13 16 -13 8 Z' fill='#C4703A'/>`
-    +`<path d='M-11 -8 Q-19 -8 -18 4 Q-16 6 -11 -1 Z' fill='#8A4F26'/><path d='M11 -8 Q19 -8 18 4 Q16 6 11 -1 Z' fill='#8A4F26'/><circle cx='0' cy='2' r='2' fill='${INK}'/></g>`,
-};
-const SLOTS = {
-  forest:[{x:210,y:225,s:1.25},{x:265,y:232,s:1}],
-  garden:[{x:64,y:222,s:1.15},{x:288,y:184,s:0.9}],
-  school:[{x:150,y:222,s:1.05},{x:250,y:222,s:0.95}],
-  desert:[{x:70,y:212,s:1.15},{x:360,y:222,s:0.95}],
-  castle:[{x:74,y:212,s:1.15},{x:320,y:214,s:1}],
-  night:[{x:104,y:222,s:1.05},{x:296,y:224,s:0.95}],
-  sea:[{x:282,y:182,s:1.15},{x:340,y:200,s:0.9}],
-  ship:[{x:60,y:190,s:1.1},{x:365,y:196,s:0.95}],
-};
-function matchProps(elements){
-  const found=[];
-  (Array.isArray(elements)?elements:[]).forEach(el=>{
-    const t=String(el||"").toLowerCase();
-    Object.keys(PROPS).forEach(key=>{
-      if(found.length<2&&!found.includes(key)&&t.includes(key)) found.push(key);
-    });
-  });
-  return found;
-}
-
-/* Placeholder shown while the real illustration is being generated.
-
-   Deliberately a drawn SVG rather than a photo from a random-dog API:
-   this is a seven- and ten-year-old's app, so the placeholder has to be
-   content we control completely. It also needs no network round trip, so
-   it is on screen instantly and cannot itself fail, arrive late, or turn
-   up blank. Varies with the chapter seed so it is not the same puppy in
-   every chapter. Same 400x250 viewBox and flat palette as sceneSvg. */
-function puppySvg(seed){
-  const s=Math.abs(Number(seed)||1);
-  const coats=[
-    {body:"#E9A73E",light:"#F6D79C",dark:"#CE8B26",ear:"#BE7C1E"}, // golden
-    {body:"#C88A5E",light:"#EBCDB0",dark:"#AC7048",ear:"#96603C"}, // chestnut
-    {body:"#B4BFC3",light:"#DFE6E8",dark:"#98A5AA",ear:"#87959B"}, // grey
-    {body:"#EFD9AE",light:"#FBF0D8",dark:"#D8BE8C",ear:"#C7AA76"}, // cream
-  ];
-  const c=coats[s%coats.length];
-  const patch=(s%3===0);
-  const u="p"+s; // unique animation names so two frames never collide
-  return `<svg viewBox='0 0 400 250' width='100%' height='100%' preserveAspectRatio='xMidYMid slice' xmlns='http://www.w3.org/2000/svg'>
-<style>
-@keyframes wag${u}{0%,100%{transform:rotate(-16deg)}50%{transform:rotate(18deg)}}
-@keyframes bob${u}{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
-@keyframes twinkle${u}{0%,100%{opacity:.2;transform:scale(.8)}50%{opacity:1;transform:scale(1.1)}}
-@keyframes dot${u}{0%,75%,100%{opacity:.22}35%{opacity:1}}
-.t${u}{transform-box:fill-box;transform-origin:0% 100%;animation:wag${u} .85s ease-in-out infinite}
-.b${u}{transform-box:fill-box;transform-origin:50% 100%;animation:bob${u} 2.6s ease-in-out infinite}
-.s${u}{transform-box:fill-box;transform-origin:50% 50%;animation:twinkle${u} 2.2s ease-in-out infinite}
-.d${u}{animation:dot${u} 1.4s ease-in-out infinite}
-@media (prefers-reduced-motion:reduce){.t${u},.b${u},.s${u},.d${u}{animation:none}}
-</style>
-<rect width='400' height='250' fill='#FCEBC7'/>
-<circle cx='200' cy='150' r='118' fill='#FDF3DE'/>
-<ellipse cx='200' cy='219' rx='74' ry='11' fill='#EBD6A9'/>
-<g class='b${u}'>
-  <path class='t${u}' d='M250 182 q28 -4 36 -32' stroke='${c.dark}' stroke-width='15' fill='none' stroke-linecap='round'/>
-  <ellipse cx='200' cy='190' rx='53' ry='40' fill='${c.body}'/>
-  <ellipse cx='200' cy='199' rx='31' ry='27' fill='${c.light}'/>
-  <ellipse cx='176' cy='215' rx='17' ry='10' fill='${c.light}'/>
-  <ellipse cx='224' cy='215' rx='17' ry='10' fill='${c.light}'/>
-  <ellipse cx='146' cy='152' rx='23' ry='45' fill='${c.ear}' transform='rotate(-16 146 152)'/>
-  <ellipse cx='254' cy='152' rx='23' ry='45' fill='${c.ear}' transform='rotate(16 254 152)'/>
-  <circle cx='200' cy='128' r='53' fill='${c.body}'/>
-  ${patch?`<circle cx='221' cy='119' r='21' fill='${c.dark}'/>`:""}
-  <ellipse cx='166' cy='142' rx='9' ry='6' fill='#F2A6A0' opacity='.5'/>
-  <ellipse cx='234' cy='142' rx='9' ry='6' fill='#F2A6A0' opacity='.5'/>
-  <ellipse cx='200' cy='150' rx='29' ry='21' fill='${c.light}'/>
-  <circle cx='180' cy='119' r='8' fill='#25393B'/><circle cx='183' cy='116' r='3' fill='#FFFFFF'/>
-  <circle cx='221' cy='119' r='8' fill='#25393B'/><circle cx='224' cy='116' r='3' fill='#FFFFFF'/>
-  <ellipse cx='200' cy='140' rx='9' ry='7' fill='#3A2A22'/>
-  <path d='M200 147 v5 M200 152 q-9 8 -16 1 M200 152 q9 8 16 1' stroke='#3A2A22' stroke-width='3' fill='none' stroke-linecap='round'/>
-  <ellipse cx='200' cy='163' rx='7' ry='9' fill='#EE8A93'/>
-</g>
-<g class='s${u}' style='animation-delay:.3s'><path d='M74 78 l4 10 10 4 -10 4 -4 10 -4 -10 -10 -4 10 -4 z' fill='#F4B23E'/></g>
-<g class='s${u}' style='animation-delay:1.1s'><path d='M322 96 l3 8 8 3 -8 3 -3 8 -3 -8 -8 -3 8 -3 z' fill='#22808A'/></g>
-<circle class='d${u}' cx='184' cy='239' r='4' fill='#F4B23E'/>
-<circle class='d${u}' cx='200' cy='239' r='4' fill='#F4B23E' style='animation-delay:.18s'/>
-<circle class='d${u}' cx='216' cy='239' r='4' fill='#F4B23E' style='animation-delay:.36s'/>
-</svg>`;
-}
-
-function sceneSvg(scene, seed, elements){
-  const s=Number(seed)||1;
-  const sunC=(s%2===0)?"#FFD66B":"#FFC94D";
-  let inner="";
-  if(scene==="sea"){
-    inner=`<rect width='400' height='250' fill='#DFF0F6'/>`+sunGlow("g"+s+"a",330,52,24,sunC)+cloud(80,58,1,"#FFFFFF")+cloud(190,40,0.8,"#FFFFFF")
-      +`<rect y='150' width='400' height='100' fill='#7EC3D8'/>`
-      +`<path d='M0 162 Q25 155 50 162 T100 162 T150 162 T200 162 T250 162 T300 162 T350 162 T400 162' stroke='#A7DBE8' stroke-width='4' fill='none' stroke-linecap='round'/>`
-      +`<path d='M0 190 Q25 183 50 190 T100 190 T150 190 T200 190 T250 190 T300 190 T350 190 T400 190' stroke='#93CFE0' stroke-width='4' fill='none' stroke-linecap='round'/>`
-      +`<path d='M120 168 Q160 152 200 168 L188 148 Z' fill='#F6F2E7'/><rect x='158' y='108' width='4' height='58' fill='#8A6242'/><path d='M162 112 L204 150 L162 150 Z' fill='#FFFFFF'/><path d='M154 116 L124 148 L154 148 Z' fill='#F4B23E'/><path d='M116 166 Q160 186 208 166 L200 180 Q160 194 124 180 Z' fill='#C8564A'/>`
-      +birdV(70,110,"#5B7C8A")+birdV(96,120,"#5B7C8A");
-  }else if(scene==="garden"){
-    inner=`<rect width='400' height='250' fill='#E7F2EA'/>`+sunGlow("g"+s+"b",66,56,22,sunC)+cloud(300,50,1,"#FFFFFF")
-      +hill(200,34,"#A8D5A2")
-      +`<rect x='150' y='104' width='118' height='92' rx='4' fill='#FFF6EA' stroke='#E8B98C' stroke-width='4'/><path d='M138 108 L209 56 L280 108 Z' fill='#E0704F'/><rect x='196' y='148' width='28' height='48' rx='3' fill='#B77B4B'/>`
-      +windowBox(163,122,22,22,"#BEE3F0")+windowBox(233,122,22,22,"#BEE3F0")
-      +tree(330,208,1.2,"#7FBF7A","#5F9E5B","#8A6242")
-      +flower(96,206,"#E8737E")+flower(120,214,"#F4B23E")+flower(74,218,"#9B7FD4")+flower(288,214,"#E8737E")
-      +`<ellipse cx='209' cy='226' rx='60' ry='10' fill='#E4D6B8'/>`;
-  }else if(scene==="school"){
-    inner=`<rect width='400' height='250' fill='#E4EEF5'/>`+cloud(70,52,1,"#FFFFFF")+cloud(330,44,0.85,"#FFFFFF")
-      +hill(206,26,"#A8D5A2")
-      +`<rect x='96' y='96' width='208' height='104' rx='5' fill='#F6E7D3' stroke='#D9BC96' stroke-width='4'/><rect x='96' y='84' width='208' height='18' rx='5' fill='#D96B4F'/><circle cx='200' cy='118' r='13' fill='#FFFFFF' stroke='#D9BC96' stroke-width='3'/><line x1='200' y1='118' x2='200' y2='110' stroke='#25393B' stroke-width='2'/><line x1='200' y1='118' x2='206' y2='120' stroke='#25393B' stroke-width='2'/>`
-      +`<rect x='186' y='152' width='28' height='48' rx='3' fill='#B77B4B'/>`
-      +windowBox(112,140,24,24,"#BEE3F0")+windowBox(148,140,24,24,"#BEE3F0")+windowBox(228,140,24,24,"#BEE3F0")+windowBox(264,140,24,24,"#BEE3F0")
-      +`<rect x='318' y='118' width='4' height='84' fill='#8A6242'/><path d='M322 120 L354 128 L322 138 Z' fill='#22808A'/>`
-      +`<circle cx='70' cy='206' r='14' fill='#7FBF7A'/><circle cx='90' cy='210' r='11' fill='#8FCB8A'/>`;
-  }else if(scene==="desert"){
-    inner=`<rect width='400' height='250' fill='#FDEBC9'/>`+sunGlow("g"+s+"c",74,58,28,"#FFB84D")
-      +hill(198,26,"#F0D49A")+hill(216,20,"#E5C588")
-      +`<path d='M208 74 L308 208 L108 208 Z' fill='#E0B368'/><path d='M208 74 L308 208 L208 208 Z' fill='#C79A50'/><rect x='196' y='178' width='24' height='30' fill='#7A5A34'/>`
-      +`<path d='M330 208 q6 -28 2 -52' stroke='#8A6242' stroke-width='8' fill='none' stroke-linecap='round'/>`
-      +`<path d='M332 156 q22 -16 36 -2 M332 156 q-22 -16 -36 -2 M332 156 q4 -26 18 -30 M332 156 q-4 -26 -18 -30' stroke='#5F9E5B' stroke-width='7' fill='none' stroke-linecap='round'/>`
-      +birdV(150,96,"#B78A4E");
-  }else if(scene==="castle"){
-    inner=`<rect width='400' height='250' fill='#E6EEF7'/>`+cloud(84,50,1,"#FFFFFF")+cloud(320,60,0.8,"#FFFFFF")
-      +hill(196,44,"#A8D5A2")
-      +`<rect x='150' y='118' width='100' height='82' fill='#E9E2D2' stroke='#C9BFA6' stroke-width='3'/>`
-      +`<rect x='128' y='96' width='34' height='104' fill='#DFD6C2' stroke='#C9BFA6' stroke-width='3'/><rect x='238' y='96' width='34' height='104' fill='#DFD6C2' stroke='#C9BFA6' stroke-width='3'/>`
-      +`<path d='M124 96 L145 62 L166 96 Z' fill='#D96B4F'/><path d='M234 96 L255 62 L276 96 Z' fill='#D96B4F'/>`
-      +`<rect x='186' y='158' width='28' height='42' rx='14' fill='#8A6242'/>`
-      +windowBox(138,118,14,18,"#BEE3F0")+windowBox(248,118,14,18,"#BEE3F0")+windowBox(168,132,16,18,"#BEE3F0")+windowBox(216,132,16,18,"#BEE3F0")
-      +`<rect x='198' y='40' width='3' height='24' fill='#8A6242'/><path d='M201 42 L222 48 L201 56 Z' fill='#F4B23E'/>`
-      +birdV(70,120,"#5B7C8A")+birdV(96,132,"#5B7C8A");
-  }else if(scene==="ship"){
-    inner=`<rect width='400' height='250' fill='#DFF0F6'/>`+sunGlow("g"+s+"d",58,52,22,sunC)+cloud(210,44,0.9,"#FFFFFF")
-      +`<rect y='158' width='400' height='92' fill='#6FB9D1'/>`
-      +`<path d='M0 172 Q25 165 50 172 T100 172 T150 172 T200 172 T250 172 T300 172 T350 172 T400 172' stroke='#9AD2E2' stroke-width='4' fill='none' stroke-linecap='round'/>`
-      +`<path d='M96 176 L232 176 L214 204 L114 204 Z' fill='#8A5A38'/><rect x='150' y='96' width='5' height='80' fill='#6E4327'/><path d='M158 100 L212 158 L158 158 Z' fill='#FFF6EA'/><path d='M146 106 L104 156 L146 156 Z' fill='#F4B23E'/><path d='M155 88 L176 94 L155 100 Z' fill='#C8564A'/>`
-      +`<ellipse cx='330' cy='196' rx='52' ry='16' fill='#EAC98C'/><path d='M330 190 q4 -22 1 -38' stroke='#8A6242' stroke-width='6' fill='none' stroke-linecap='round'/><path d='M331 150 q18 -12 30 -2 M331 150 q-18 -12 -30 -2 M331 150 q2 -20 14 -24' stroke='#5F9E5B' stroke-width='6' fill='none' stroke-linecap='round'/>`
-      +birdV(258,100,"#5B7C8A")+birdV(286,112,"#5B7C8A");
-  }else if(scene==="night"){
-    const st=[];
-    for(let i=0;i<9;i++){
-      const sx=((s*13+i*53)%376)+12, sy=((s*7+i*41)%84)+14;
-      st.push(`<circle cx='${sx}' cy='${sy}' r='${i%3===0?2.4:1.6}' fill='#FBEFC0'/>`);
-    }
-    inner=`<rect width='400' height='250' fill='#2C3D5C'/>`+st.join("")
-      +`<circle cx='322' cy='58' r='26' fill='#F5E9B8'/><circle cx='322' cy='58' r='34' fill='#F5E9B8' opacity='0.18'/>`
-      +hill(190,40,"#3E5570")+hill(212,30,"#33455E")
-      +`<rect x='150' y='142' width='96' height='70' rx='4' fill='#26334A'/><path d='M140 146 L198 108 L256 146 Z' fill='#1F2A3E'/>`
-      +windowBox(164,158,20,20,"#FFD66B")+windowBox(214,158,20,20,"#FFD66B")
-      +`<rect x='60' y='168' width='8' height='44' rx='3' fill='#1F2A3E'/><circle cx='64' cy='156' r='18' fill='#31456A'/><circle cx='52' cy='164' r='12' fill='#31456A'/><circle cx='76' cy='164' r='12' fill='#31456A'/>`;
-  }else{ /* forest (default) */
-    inner=`<rect width='400' height='250' fill='#DCEFE7'/>`+sunGlow("g"+s+"e",330,54,24,sunC)+cloud(90,54,1,"#FFFFFF")+cloud(210,42,0.75,"#FFFFFF")
-      +hill(192,40,"#A9D3A0")+hill(214,30,"#7FBD84")
-      +tree(80,214,1.35,"#5F9E5B","#4E8A56","#8A6242")+tree(180,222,1.05,"#7FBF7A","#6BAD73","#8A6242")+tree(320,218,1.5,"#5F9E5B","#4E8A56","#8A6242")
-      +flower(128,224,"#E8737E")+flower(240,230,"#F4B23E")+flower(266,222,"#9B7FD4")
-      +birdV(140,96,"#5B7C8A")+birdV(170,104,"#5B7C8A");
-  }
-  const picked=matchProps(elements);
-  const slots=SLOTS[scene]||SLOTS.forest;
-  picked.forEach((key,i)=>{ if(slots[i]) inner+=PROPS[key](slots[i].x,slots[i].y,slots[i].s); });
-  inner+=`<radialGradient id='vig${s}' cx='50%' cy='45%' r='75%'><stop offset='58%' stop-color='#1A2420' stop-opacity='0'/><stop offset='100%' stop-color='#1A2420' stop-opacity='0.12'/></radialGradient><rect width='400' height='250' fill='url(#vig${s})'/>`;
-  return `<svg viewBox='0 0 400 250' width='100%' height='100%' preserveAspectRatio='xMidYMid slice' xmlns='http://www.w3.org/2000/svg'>${inner}</svg>`;
-}
 /* ---------------- utils ---------------- */
 function rand(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
 function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const t=a[i]; a[i]=a[j]; a[j]=t; } return a; }
@@ -975,14 +719,11 @@ function QuestionCard({num,q,st,onPick,isKnown,onWord}){
   );
 }
 
-function StoryImage({prompt,photoQuery,scene,seed,elements}){
-  const [phase,setPhase]=useState("puppy"); // puppy | img | photo | fallback
-  const [photoUrl,setPhotoUrl]=useState(null);
-  const [genDead,setGenDead]=useState(false); // stop waiting for the illustration
-  const triedPhoto=useRef(false);
-  const genLoaded=useRef(false);
-  const timeoutRef=useRef(null);
+function StoryImage({prompt,seed}){
+  const [phase,setPhase]=useState("wait");      // wait | img
+  const [genDead,setGenDead]=useState(false);
   const giveUpRef=useRef(null);
+
   const genUrl=useMemo(()=>{
     if(!prompt) return null;
     const look=CHARACTER_LOOK?` ${READER_NAME} looks like: ${CHARACTER_LOOK}.`:"";
@@ -994,87 +735,36 @@ function StoryImage({prompt,photoQuery,scene,seed,elements}){
     return base+"&model=flux&seed="+(Number(seed)||1);
   },[prompt,seed]);
 
-  async function tryPhoto(){
-    if(triedPhoto.current) return;
-    triedPhoto.current=true;
-    if(!ENABLE_PHOTO_FALLBACK||!photoQuery){ if(!genLoaded.current) setPhase("fallback"); return; }
-    try{
-      const res=await fetch("https://api.openverse.org/v1/images/?q="
-        +encodeURIComponent(photoQuery)+"&license=cc0,pdm,by,by-sa&page_size=8&mature=false");
-      const j=await res.json();
-      // The illustration may have landed while this request was in flight.
-      // If so it stays on screen and the photo is discarded.
-      if(genLoaded.current) return;
-      const list=(j&&Array.isArray(j.results))?j.results.filter(r=>r&&(r.thumbnail||r.url)):[];
-      if(list.length){
-        const pick=list[Math.floor(Math.random()*list.length)];
-        setPhotoUrl(pick.thumbnail||pick.url);
-        setPhase("photo");
-      }else setPhase("fallback");
-    }catch(e){ if(!genLoaded.current) setPhase("fallback"); }
-  }
-
-  function clearTimers(){
-    if(timeoutRef.current){ clearTimeout(timeoutRef.current); timeoutRef.current=null; }
-    if(giveUpRef.current){ clearTimeout(giveUpRef.current); giveUpRef.current=null; }
-  }
-
-  // The illustration wins whenever it arrives, even if the photo placeholder or
-  // the SVG is already on screen. This is the whole point of the rewrite.
-  function onGenLoad(){
-    clearTimers();
-    genLoaded.current=true;
-    triedPhoto.current=true;
-    setPhase("img");
-  }
-
-  function onGenError(){
-    clearTimers();
-    setGenDead(true);
-    tryPhoto();
-  }
+  function stopTimer(){ if(giveUpRef.current){ clearTimeout(giveUpRef.current); giveUpRef.current=null; } }
 
   useEffect(()=>{
-    triedPhoto.current=false;
-    genLoaded.current=false;
-    setPhotoUrl(null);
     setGenDead(false);
-    if(!genUrl){ setPhase("fallback"); tryPhoto(); return; }
-    // Puppy is on screen from the first frame. No timer, no stock photo.
-    setPhase("puppy");
-    // If the illustration never arrives, fall through to the topical photo
-    // and then the scene drawing, rather than leaving a puppy on a story
-    // about a lighthouse.
-    giveUpRef.current=setTimeout(()=>{ setGenDead(true); tryPhoto(); },IMG_GIVE_UP_MS);
-    return clearTimers;
+    setPhase("wait");
+    if(!genUrl){ setGenDead(true); return; }
+    giveUpRef.current=setTimeout(()=>setGenDead(true),IMG_GIVE_UP_MS);
+    return stopTimer;
     // eslint-disable-next-line
-  },[genUrl,photoQuery]);
+  },[genUrl]);
 
-  const fbScene=SCENES.includes(scene)?scene:"forest";
   return (
     <div className="imgwrap illu pop">
+      {/* One painted picture sits under every story image. It is what shows
+          while the illustration is being drawn and what stays if the drawing
+          never arrives. No stock photos, no generated vector scenes. */}
+      <img src={FALLBACK_IMG} alt="" aria-hidden="true"
+        style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",zIndex:0}}/>
+      {phase!=="img"&&!genDead&&(
+        <div className="drawing">
+          <i/><i style={{animationDelay:".18s"}}/><i style={{animationDelay:".36s"}}/>
+        </div>
+      )}
       {genUrl&&!genDead&&(
         <img src={genUrl} alt=""
           style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",
-            opacity:phase==="img"?1:0,transition:"opacity .4s",zIndex:3,
+            opacity:phase==="img"?1:0,transition:"opacity .5s",zIndex:2,
             pointerEvents:phase==="img"?"auto":"none"}}
-          onLoad={onGenLoad}
-          onError={onGenError}/>
-      )}
-      {phase==="photo"&&photoUrl&&(
-        <img src={photoUrl} alt="" className="fi"
-          style={{position:"absolute",inset:0,width:"100%",height:"100%",objectFit:"cover",zIndex:2}}
-          onError={()=>{ if(!genLoaded.current) setPhase("fallback"); }}/>
-      )}
-      {phase==="fallback"&&(
-        <div style={{position:"absolute",inset:0,zIndex:1}}
-          dangerouslySetInnerHTML={{__html:sceneSvg(fbScene,seed,elements)}}/>
-      )}
-      {/* Stays mounted through the .4s cross-fade so there is no blank flash
-          between the puppy leaving and the illustration becoming opaque. */}
-      {(phase==="puppy"||phase==="img")&&(
-        <div style={{position:"absolute",inset:0,zIndex:0}}
-          dangerouslySetInnerHTML={{__html:puppySvg(seed)}}/>
+          onLoad={()=>{ stopTimer(); setPhase("img"); }}
+          onError={()=>{ stopTimer(); setGenDead(true); }}/>
       )}
     </div>
   );
@@ -2569,7 +2259,7 @@ export default function App(){
               const isLatest=ci===curChapterIdx;
               return (
                 <React.Fragment key={ci}>
-                  {img&&<StoryImage prompt={img.prompt} photoQuery={img.photoQuery} scene={img.scene} seed={img.seed} elements={img.elements}/>}
+                  {img&&<StoryImage prompt={img.prompt} seed={img.seed}/>}
                   {story.chapterEnds.length>1&&(
                     <div className="serif" style={{textAlign:"center",color:"var(--muted)",fontWeight:800,margin:"18px 0 8px"}}>
                       ✦ Chapter {ci+1} ✦
