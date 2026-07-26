@@ -1,0 +1,21 @@
+# Lets the Worker deploy from this repo instead of being pasted into the
+# Cloudflare dashboard by hand.
+#
+# The name MUST stay exactly "story-time-proxy" — that is the existing
+# Worker behind story-time-proxy.gvmdc2tpsb.workers.dev. Change it and the
+# next deploy creates a SECOND, empty Worker on a different subdomain while
+# the app keeps talking to the old one.
+#
+# This file does nothing on its own. It takes effect only once Workers
+# Builds is connected (Cloudflare dashboard -> story-time-proxy ->
+# Settings -> Builds -> Connect), after which every push to main deploys.
+#
+# Deliberately NO [vars] block. ANTHROPIC_API_KEY, OPENAI_API_KEY,
+# POLLINATIONS_KEY and the optional CHARACTER_LOOK stay as encrypted
+# secrets in the dashboard. Deploys do not read, write or clear them, and
+# no key ever lands in this public repo.
+
+name = "story-time-proxy"
+main = "worker/worker.js"
+compatibility_date = "2026-05-01"
+workers_dev = true
