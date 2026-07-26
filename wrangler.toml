@@ -6,16 +6,27 @@
 # next deploy creates a SECOND, empty Worker on a different subdomain while
 # the app keeps talking to the old one.
 #
-# This file does nothing on its own. It takes effect only once Workers
-# Builds is connected (Cloudflare dashboard -> story-time-proxy ->
-# Settings -> Builds -> Connect), after which every push to main deploys.
-#
 # Deliberately NO [vars] block. ANTHROPIC_API_KEY, OPENAI_API_KEY,
 # POLLINATIONS_KEY and the optional CHARACTER_LOOK stay as encrypted
 # secrets in the dashboard. Deploys do not read, write or clear them, and
 # no key ever lands in this public repo.
+#
+# There must be exactly ONE wrangler config in this repo. A wrangler.jsonc
+# briefly existed alongside this file; two configs is ambiguous, and it was
+# removed in the same commit that added the two settings below.
 
 name = "story-time-proxy"
 main = "worker/worker.js"
 compatibility_date = "2026-05-01"
 workers_dev = true
+
+# Plain-text variables set in the dashboard are wiped by a deploy unless
+# this is on. Encrypted secrets are never touched either way, but this is
+# the guard in case a key was ever added as Text rather than Secret.
+keep_vars = true
+
+# Set explicitly so deploying from Git cannot silently switch the logs off.
+# Those logs are the only way to see whether an illustration came from
+# OpenAI or quietly fell back to pollinations.
+[observability]
+enabled = true
