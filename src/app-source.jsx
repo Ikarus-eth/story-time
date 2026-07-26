@@ -542,9 +542,42 @@ const CAST_KINDS=[
 const CAST_MAX=12;
 const CAST_EXTRAS=2;      // how many non-hero entries a story may draw on
 
+/* She writes as much as she likes. What reaches a prompt is a distilled
+   version, because the cast block rides along with every story and every
+   illustration, and long rambling text there crowds out the story itself.
+
+   Two distillations rather than one, because the consumers want different
+   things: the illustrator needs what can be SEEN, the story needs who
+   someone is. Distillation is an optimisation, never a dependency - if the
+   call fails, her own words are used, trimmed. */
+const CAST_DESC_MAX=2000;   // what she may write
+const CAST_LOOK_MAX=220;    // what the illustrator is given
+const CAST_FACTS_MAX=320;   // what the story is given
+const DISTILL_MIN=180;      // below this her words are already short enough
+
+function distillCastPrompt(c){
+  const kind=(CAST_KINDS.find(k=>k.id===c.kind)||{}).label||"character";
+  return [
+    `A 10-year-old is describing a ${kind.toLowerCase()} called "${c.name}" for her own storybook. Everything between the angle brackets is exactly what she wrote, in her own words, possibly in German or a mix of German and English:`,
+    `<<< ${String(c.desc||"").slice(0,CAST_DESC_MAX)} >>>`,
+    `Write two short English summaries for a story generator.`,
+    `"look": ONLY what can be seen - colour, hair, fur, eyes, size, clothing, distinctive features. Max ${CAST_LOOK_MAX} characters. If she described nothing visual at all, use an empty string.`,
+    `"facts": who they are and what matters for a story - relationships, age, personality, what they love, habits. Max ${CAST_FACTS_MAX} characters. Leave out visual detail unless it is central to who they are.`,
+    `Rules: keep every concrete detail she gave EXACTLY as she gave it. Colours, names, ages and numbers must never change and must never be dropped. Invent nothing she did not say. Translate German into English. Write in the third person. Plain sentences, no quotation marks inside the values.`,
+    `Reply with ONLY one single-line JSON object, nothing else:`,
+    `{"look":"...","facts":"..."}`,
+  ].join("\n");
+}
+
+function castFacts(c){
+  return String((c&&c.facts)||(c&&c.desc)||"").replace(/\s+/g," ").trim().slice(0,CAST_FACTS_MAX);
+}
+function castLookText(c){
+  return String((c&&c.look)||(c&&c.desc)||"").replace(/\s+/g," ").trim().slice(0,CAST_LOOK_MAX);
+}
 function castEntryLine(c){
   const kind=(CAST_KINDS.find(k=>k.id===c.kind)||{}).label||"Character";
-  return `- ${c.name} (${kind.toLowerCase()}): ${String(c.desc||"").replace(/\s+/g," ").trim()}`;
+  return `- ${c.name} (${kind.toLowerCase()}): ${castFacts(c)}`;
 }
 /* Anyone she names in her own words is in the story, whether or not the dice
    would have chosen them. Typing "Mausie and I go to the mountains" has to
@@ -599,8 +632,10 @@ function castLine(picked){
 /* Appended to the illustration prompt so the picture agrees with the text. */
 function castLook(picked){
   if(!picked||!picked.length) return "";
+  const bits=picked.map(c=>({n:c.name,l:castLookText(c)})).filter(x=>x.l);
+  if(!bits.length) return "";
   return " If any of these appear, they must look exactly like this: "
-    +picked.map(c=>`${c.name} - ${String(c.desc||"").replace(/\s+/g," ").trim()}`).join("; ")+".";
+    +bits.map(x=>`${x.n} - ${x.l}`).join("; ")+".";
 }
 /* One portrait per cast member. The seed is derived from the description, so
    editing the description redraws the picture and leaving it alone does not. */
@@ -610,9 +645,9 @@ function castPortraitUrl(c){
   const subject=c.kind==="place"?`the place called ${c.name}`:`${c.name}, a ${kind.toLowerCase()}`;
   const p="children's picture-book portrait illustration, soft watercolor and gouache, warm buttery light, "
     +"teal-and-honey palette, plain simple background, one clear friendly subject, calm and cheerful: "
-    +subject+". "+String(c.desc||"").replace(/\s+/g," ").trim()
+    +subject+". "+castLookText(c)
     +". Nothing frightening, no text, no letters, no words.";
-  return IMAGE_URL+"?prompt="+encodeURIComponent(p)+"&width=832&height=520&seed="+(hash(c.name+"|"+(c.desc||""))%9973);
+  return IMAGE_URL+"?prompt="+encodeURIComponent(p)+"&width=832&height=520&seed="+(hash(c.name+"|"+castLookText(c))%9973);
 }
 
 /* ---------------- prompts ---------------- */
@@ -1151,11 +1186,24 @@ function CastEditor({entry,onSave,onCancel,onDelete}){
       </div>
       <input className="field" value={name} maxLength={24} placeholder="Name"
         onChange={e=>setName(e.target.value)}/>
-      <textarea className="field" rows={4} value={desc} maxLength={400}
+      <textarea className="field" rows={8} value={desc} maxLength={CAST_DESC_MAX}
         placeholder={hint} onChange={e=>setDesc(e.target.value)}/>
       <div style={{fontSize:12,color:"var(--muted)",marginTop:-4,marginBottom:10}}>
-        Tap the microphone on the keyboard and just say it. {desc.length}/400
+        Tap the microphone on the keyboard and say as much as you like - I'll keep
+        the important parts. {desc.length}/{CAST_DESC_MAX}
       </div>
+      {(entry.look||entry.facts||entry.distilling)&&desc===(entry.desc||"")&&(
+        <div className="de-box" style={{marginTop:0,marginBottom:12}}>
+          <div style={{fontSize:11,fontWeight:800,letterSpacing:1,color:"#6E6788"}}>WHAT THE STORY SEES</div>
+          {entry.distilling
+            ? <div style={{fontSize:13,marginTop:5,color:"#5A5470"}}>Reading what you wrote…</div>
+            : <>
+                {entry.facts&&<div style={{fontSize:13,marginTop:5,color:"#5A5470",lineHeight:1.5}}>{entry.facts}</div>}
+                {entry.look&&<div style={{fontSize:13,marginTop:5,color:"#5A5470",lineHeight:1.5}}><b>Looks like:</b> {entry.look}</div>}
+                <div style={{fontSize:11,marginTop:6,color:"#8A83A0"}}>Something wrong or missing? Add it above and save again.</div>
+              </>}
+        </div>
+      )}
       {ready&&(
         <div style={{display:"flex",gap:12,alignItems:"center",margin:"6px 0 12px"}}>
           <CastPortrait entry={preview} size={92}/>
@@ -2189,6 +2237,33 @@ export default function App(){
   }
   function removeCast(id){ saveWorld(world.cast.filter(c=>c.id!==id)); }
 
+  /* Save straight away so nothing she wrote can be lost, then distil in the
+     background. A failed or slow distillation costs nothing: castFacts and
+     castLookText fall back to her own words, trimmed. */
+  async function saveCastEntry(e){
+    const prev=world.cast.find(c=>c.id===e.id);
+    const changed=!prev||String(prev.desc||"")!==String(e.desc||"");
+    const short=String(e.desc||"").length<=DISTILL_MIN;
+    if(!changed){ upsertCast({...e,look:prev?prev.look:"",facts:prev?prev.facts:""}); return; }
+    if(short){ upsertCast({...e,look:"",facts:"",distilling:false}); return; }
+
+    upsertCast({...e,look:"",facts:"",distilling:true});
+    let look="",facts="";
+    try{
+      const j=await askJson(distillCastPrompt(e));
+      look=String(j&&j.look||"").replace(/\s+/g," ").trim().slice(0,CAST_LOOK_MAX);
+      facts=String(j&&j.facts||"").replace(/\s+/g," ").trim().slice(0,CAST_FACTS_MAX);
+    }catch(err){
+      console.error("[StoryTime] could not distil character:",err&&err.message);
+    }
+    setWorld(w=>{
+      const cast=w.cast.map(c=>c.id===e.id?{...c,look,facts,distilling:false}:c);
+      const nw={cast};
+      sSet("world",nw);
+      return nw;
+    });
+  }
+
   /* ---- vocab management ---- */
   function deleteWord(k){
     setVocab(v=>{
@@ -2378,7 +2453,7 @@ export default function App(){
 
             {edit&&(
               <CastEditor entry={edit}
-                onSave={e=>{ upsertCast(e); setEdit(null); }}
+                onSave={e=>{ saveCastEntry(e); setEdit(null); }}
                 onCancel={()=>setEdit(null)}
                 onDelete={edit.id&&world.cast.some(c=>c.id===edit.id)
                   ? ()=>{ removeCast(edit.id); setEdit(null); } : null}/>
@@ -2396,7 +2471,7 @@ export default function App(){
                     <span style={{flex:1,minWidth:0}}>
                       <span style={{display:"block",fontWeight:800,fontSize:17}}>{c.name}</span>
                       <span style={{display:"block",fontSize:13,color:"var(--muted)",lineHeight:1.4,
-                        maxHeight:38,overflow:"hidden"}}>{c.desc}</span>
+                        maxHeight:38,overflow:"hidden"}}>{c.distilling?"Reading what you wrote…":(c.facts||c.desc)}</span>
                       {c.include===false&&<span style={{display:"block",fontSize:11,fontWeight:700,color:"var(--muted)",marginTop:2}}>not in stories</span>}
                     </span>
                     <span style={{color:"var(--pri)",fontSize:19}}>✎</span>
