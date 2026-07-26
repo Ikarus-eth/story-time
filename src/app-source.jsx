@@ -18,8 +18,95 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
    ============================================================ */
 
 const DAY = 86400000;
-const SRS_DAYS = [1, 3, 7, 14];
+const SRS_DAYS = [1, 3, 7, 14];   // legacy ladder, kept only to migrate old saves
 const WCACHE_MAX = 300;
+
+/* ---------------- scheduling ----------------
+   The old scheduler was a fixed 1/3/7/14 ladder with binary self-report:
+   the child pressed "I knew it" and the word moved one rung, or missed and
+   fell all the way back to rung one. Two problems. Children over-rate their
+   own recall, so the input was unreliable. And a single lapse discarded
+   everything a word had earned, while a word she found trivial could never
+   go beyond a fortnight.
+
+   Replaced with an FSRS-style memory model. Each word carries:
+     s  stability, in days - the interval at which recall probability is 90%
+     d  difficulty, 1 to 10
+   Retrievability decays on a power curve, and the next review is placed
+   where recall is predicted to fall to TARGET_R. FSRS needs roughly 20-30%
+   fewer reviews than SM-2 for the same retention across a benchmark of
+   hundreds of millions of reviews, and the gap over a fixed ladder is wider
+   still.
+
+   Weights are the published FSRS-4.5 defaults, fitted on a very large review
+   corpus. They are not tuned to one child and are not meant to be; the point
+   of a default is that it is a good prior for someone with no history. */
+const FSRS_W=[0.4872,1.4003,3.7145,13.8206,5.1618,1.2298,0.8975,0.0310,
+              1.6474,0.1367,1.0461,2.1072,0.0793,0.3246,1.5870,0.2272,2.8755];
+const FSRS_DECAY=-0.5;
+const FSRS_FACTOR=Math.pow(0.9,1/FSRS_DECAY)-1;   // 19/81
+const TARGET_R=0.9;
+
+function clampD(d){ return Math.min(10,Math.max(1,d)); }
+function initS(g){ return Math.max(0.1,FSRS_W[g-1]); }
+function initD(g){ return clampD(FSRS_W[4]-(g-3)*FSRS_W[5]); }
+function retrievability(days,s){ return Math.pow(1+FSRS_FACTOR*days/Math.max(0.1,s),FSRS_DECAY); }
+function nextD(d,g){
+  const dd=d-FSRS_W[6]*(g-3);
+  return clampD(FSRS_W[7]*initD(4)+(1-FSRS_W[7])*dd);   // mean reversion
+}
+function nextS(s,d,r,g){
+  if(g===1){ // lapse: keeps a share of what the word had earned
+    return Math.max(0.1,FSRS_W[11]*Math.pow(d,-FSRS_W[12])*(Math.pow(s+1,FSRS_W[13])-1)*Math.exp((1-r)*FSRS_W[14]));
+  }
+  const hard=g===2?FSRS_W[15]:1, easy=g===4?FSRS_W[16]:1;
+  return Math.max(0.1,s*(1+Math.exp(FSRS_W[8])*(11-d)*Math.pow(s,-FSRS_W[9])
+    *(Math.exp((1-r)*FSRS_W[10])-1)*hard*easy));
+}
+function intervalFor(s){
+  return Math.max(1,Math.round(s/FSRS_FACTOR*(Math.pow(TARGET_R,1/FSRS_DECAY)-1)));
+}
+/* grade: 1 missed, 2 slow or hinted, 3 correct, 4 correct and fast. */
+function schedule(entry,grade,now){
+  const t=now||Date.now();
+  const fresh=!entry||entry.s==null;
+  let s,d;
+  if(fresh){ s=initS(grade); d=initD(grade); }
+  else{
+    const days=Math.max(0,(t-(entry.last||entry.added||t))/DAY);
+    const r=retrievability(days,entry.s);
+    s=nextS(entry.s,entry.d==null?5:entry.d,r,grade);
+    d=nextD(entry.d==null?5:entry.d,grade);
+  }
+  return {
+    ...(entry||{}), s, d, last:t, due:t+intervalFor(s)*DAY,
+    reps:((entry&&entry.reps)||0)+1,
+    lapses:((entry&&entry.lapses)||0)+(grade===1?1:0),
+  };
+}
+/* Four display bands, so she sees progress without seeing the arithmetic. */
+const STRENGTH_BANDS=[1,4,14,45];
+const STRENGTH_NAMES=["Just met","Getting there","Sticking","Strong","Known"];
+function strengthOf(e){
+  const s=(e&&e.s)||0;
+  let n=0; for(const b of STRENGTH_BANDS){ if(s>=b) n++; }
+  return n;                                    // 0..4
+}
+function migrateEntry(e){
+  if(!e||e.s!=null) return e;                  // already migrated
+  return {...e, s:SRS_DAYS[Math.min(e.iv||0,SRS_DAYS.length-1)], d:5,
+    reps:(e.iv||0)+1, lapses:0, last:e.added||Date.now()};
+}
+
+/* Turn what actually happened into a grade, instead of asking her to judge
+   her own memory. Children reliably over-rate recall, so self-report was the
+   weakest input in the old design. */
+const FAST_MS=3500, SLOW_MS=12000;
+function gradeFrom(correct,ms,usedHint){
+  if(!correct) return 1;
+  if(usedHint||ms>SLOW_MS) return 2;
+  return ms<FAST_MS?4:3;
+}
 
 /* Optional: paste a pollinations.ai PUBLISHABLE key (pk_...) from enter.pollinations.ai
    here to switch illustrations to their gptimage-large model (GPT-Image quality, costs
@@ -218,6 +305,30 @@ textarea.input{resize:none;line-height:1.5}
   background:#fff;border-radius:26px 26px 0 0;padding:20px 22px 34px;
   box-shadow:0 -8px 30px rgba(20,40,42,.2);animation:up .25s ease-out}
 .de-box{background:var(--lilac);border-radius:14px;padding:12px 14px;margin-top:14px}
+/* ---- word practice ---- */
+.pill{display:inline-block;font-size:11px;font-weight:800;letter-spacing:1.2px;
+  color:#8A6B12;background:var(--honey-soft);border-radius:99px;padding:5px 11px;margin-bottom:12px}
+.wimg{position:relative;width:100%;aspect-ratio:16/10;border-radius:16px;overflow:hidden;
+  background:#F1F6F4;display:flex;align-items:center;justify-content:center}
+.wimg-ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font-size:40px;color:#B9CCC8}
+.tile-slots{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:14px}
+.slot{width:30px;height:38px;border-radius:8px;background:#F1F6F4;border:2px solid var(--line);
+  display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;
+  font-family:var(--serif,inherit)}
+.slot.filled{background:var(--honey-soft);border-color:var(--honey)}
+.tile-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:center}
+.tile{width:42px;height:46px;border-radius:12px;border:1px solid var(--line);background:#fff;
+  font-size:20px;font-weight:800;color:var(--ink);font-family:inherit}
+.tile:active{background:var(--honey-soft)}
+/* ---- parent dashboard ---- */
+.dash-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0}
+.metric{background:#fff;border:1px solid var(--line);border-radius:16px;padding:12px 14px}
+.metric b{display:block;font-size:24px;line-height:1.2}
+.metric span{font-size:12px;color:var(--muted);font-weight:700}
+.spark{display:flex;align-items:flex-end;gap:3px;height:44px;margin-top:8px}
+.spark i{flex:1;background:var(--pri);border-radius:3px 3px 0 0;min-height:2px;display:block}
+.dash-h{font-weight:800;font-size:13px;letter-spacing:1px;color:var(--muted);margin:20px 0 6px}
 .flashcard{min-height:260px;display:flex;flex-direction:column;align-items:center;
   justify-content:center;text-align:center;padding:26px 22px;cursor:pointer}
 .dots i{display:inline-block;width:9px;height:9px;border-radius:99px;background:var(--pri);
@@ -797,14 +908,15 @@ function Bar({value}){
   return <div className="bar"><i style={{width:Math.max(0,Math.min(100,value))+"%"}}/></div>;
 }
 
-function LevelDots({iv,size}){
-  const n=SRS_DAYS.length;
+function LevelDots({e,size}){
+  const n=STRENGTH_BANDS.length;
+  const lit=strengthOf(e);
   const s=size||9;
   return (
     <div style={{display:"inline-flex",gap:4,alignItems:"center"}}>
       {Array.from({length:n}).map((_,i)=>(
         <span key={i} style={{width:s,height:s,borderRadius:99,flex:"none",
-          background:i<=iv?"var(--honey)":"#E3ECEA"}}/>
+          background:i<lit?"var(--honey)":"#E3ECEA"}}/>
       ))}
     </div>
   );
@@ -830,8 +942,8 @@ function QuestionCard({num,q,st,onPick,isKnown,onWord}){
   const a=st||{attempts:0,done:false,gotRight:false,reveal:false,picked:[]};
   return (
     <div className="card fi" style={{padding:"18px 18px 16px",margin:"18px 0"}}>
-      <div style={{fontWeight:800,fontSize:13,color:q.isVocab?"#B07A16":"var(--pri-dark)",letterSpacing:1,marginBottom:6}}>
-        {q.isVocab?"💡 WORD QUESTION":"QUESTION "+num}
+      <div style={{fontWeight:800,fontSize:13,color:"var(--pri-dark)",letterSpacing:1,marginBottom:6}}>
+        {"QUESTION "+num}
       </div>
       <div style={{fontSize:18,fontWeight:700,lineHeight:1.5}}>
         <TapText text={q.q} isKnown={isKnown} onWord={onWord}/>
@@ -968,6 +1080,376 @@ function StoryImage({prompt,photoQuery,scene,seed,elements}){
   );
 }
 
+/* ---------------- word practice ----------------
+   The old exercise was one flip card per word: see the word, turn it over,
+   press "I knew it". That is recognition plus self-report, the two weakest
+   things you can build a vocabulary trainer on.
+
+   Four formats instead, chosen by how strong the word already is, so the
+   retrieval effort rises as the memory does:
+
+     meet       first encounter. Picture, sound, English, German, and the
+                sentence it came from. Study, not test.
+     recognise  picture cue -> pick the English word. Pictures beat L1 words
+                specifically as retrieval cues for children, which is why the
+                picture is the prompt here rather than decoration.
+     cloze      the sentence from her own story with the word cut out.
+                Contextual, and harder than a bare picture.
+     produce    picture and German -> spell the word from letter tiles.
+                Generative recall, which retains better than multiple choice,
+                but tappable, because a 10-year-old on an iPad will not type
+                full words for ten items and the research is equally clear
+                that difficulty has to stay executable.
+
+   New words are met at the start of the session and retrieved again at the
+   end, with the due reviews in between as the spacing gap. */
+
+function modeFor(e){
+  if(!e||e.s==null) return "recognise";
+  const st=strengthOf(e);
+  if(st<=1) return "recognise";
+  if(st===2) return e.ctx?"cloze":"recognise";
+  return "produce";
+}
+
+function wordImageUrl(e){
+  if(!IMAGE_URL||!e||!e.w) return null;
+  const subject=e.en?(e.w+" — "+e.en):e.w;
+  const p="children's picture-book illustration, soft watercolor and gouache, warm teal and honey palette, "
+    +"one clear friendly subject on a plain background, calm and cheerful: "+subject
+    +", nothing frightening, no text, no letters, no words";
+  return IMAGE_URL+"?prompt="+encodeURIComponent(p)+"&width=832&height=520&seed="+(hash(e.w)%9973);
+}
+
+/* Picture cue. Falls back to the word itself if there is no image route, or
+   if the image fails or is still drawing - practice never blocks on a picture. */
+function WordImage({entry,hidden}){
+  const url=useMemo(()=>wordImageUrl(entry),[entry&&entry.w]);
+  const [state,setState]=useState(url?"load":"none");
+  useEffect(()=>{ setState(url?"load":"none"); },[url]);
+  return (
+    <div className="wimg">
+      {url&&state!=="fail"&&(
+        <img src={url} alt="" onLoad={()=>setState("ok")} onError={()=>setState("fail")}
+          style={{width:"100%",height:"100%",objectFit:"cover",
+            opacity:state==="ok"?1:0,transition:"opacity .35s"}}/>
+      )}
+      {state!=="ok"&&(
+        <div className="wimg-ph">{hidden?"?":"🖼"}</div>
+      )}
+    </div>
+  );
+}
+
+/* Tap letters in order to spell the word. Decoy letters are drawn from the
+   same word where possible so the tiles cannot be solved by elimination. */
+function LetterTiles({word,onDone,disabled}){
+  const target=String(word||"").toLowerCase();
+  const [typed,setTyped]=useState([]);
+  const tiles=useMemo(()=>{
+    const base=target.replace(/[^a-zà-öø-ÿ'-]/gi,"").split("");
+    const extra="aeiourstlnm".split("");
+    const pool=[...base];
+    while(pool.length<Math.min(14,base.length+3)) pool.push(rand(extra));
+    return shuffle(pool).map((ch,i)=>({ch,i}));
+  },[target]);
+  const [used,setUsed]=useState([]);
+  useEffect(()=>{ setTyped([]); setUsed([]); },[target]);
+  function tap(t){
+    if(disabled) return;
+    const nt=[...typed,t.ch], nu=[...used,t.i];
+    setTyped(nt); setUsed(nu);
+    const clean=target.replace(/[^a-zà-öø-ÿ'-]/gi,"");
+    if(nt.length>=clean.length) onDone(nt.join("")===clean);
+  }
+  function back(){
+    if(disabled||!typed.length) return;
+    setTyped(typed.slice(0,-1)); setUsed(used.slice(0,-1));
+  }
+  return (
+    <div>
+      <div className="tile-slots">
+        {String(target).replace(/[^a-zà-öø-ÿ'-]/gi,"").split("").map((_,i)=>(
+          <span key={i} className={"slot"+(typed[i]?" filled":"")}>{typed[i]||""}</span>
+        ))}
+      </div>
+      <div className="tile-row">
+        {tiles.map(t=>(
+          <button key={t.i} className="tile" disabled={disabled||used.includes(t.i)}
+            style={{visibility:used.includes(t.i)?"hidden":"visible"}}
+            onClick={()=>tap(t)}>{t.ch}</button>
+        ))}
+      </div>
+      <button className="btn btn-plain" style={{marginTop:10}} onClick={back} disabled={disabled||!typed.length}>⌫ Back</button>
+    </div>
+  );
+}
+
+/* One exercise. Reports grade, elapsed time and correctness upward; it does
+   not touch the schedule itself. */
+function PracticeCard({item,entry,options,onResult}){
+  const [picked,setPicked]=useState(null);
+  const [done,setDone]=useState(false);
+  const [hint,setHint]=useState(false);
+  const startedAt=useRef(Date.now());
+  useEffect(()=>{ setPicked(null); setDone(false); setHint(false); startedAt.current=Date.now(); },[item.key,item.mode]);
+
+  const mode=item.mode;
+  const word=entry.w;
+
+  function settle(correct){
+    if(done) return;
+    const ms=Date.now()-startedAt.current;
+    setDone(true);
+    onResult({correct,ms,grade:gradeFrom(correct,ms,hint),mode});
+  }
+  function pick(opt){
+    if(done) return;
+    setPicked(opt);
+    settle(String(opt).toLowerCase()===String(word).toLowerCase());
+  }
+
+  if(mode==="meet"){
+    return (
+      <div className="card pop" style={{padding:18}}>
+        <div className="pill">NEW WORD</div>
+        <WordImage entry={entry}/>
+        <div className="serif" style={{fontSize:34,fontWeight:800,marginTop:12}}>
+          <span className="hi">{word}</span>
+        </div>
+        <button className="spk" style={{marginTop:12}} aria-label="Say the word"
+          onClick={()=>speak(word)}>🔊</button>
+        {entry.en&&<div style={{fontSize:17,marginTop:12,lineHeight:1.5}}>{entry.en}</div>}
+        {(entry.de||entry.dd)&&(
+          <div className="de-box" style={{width:"100%"}}>
+            {entry.de&&<div style={{fontWeight:800,fontSize:18}}>{entry.de}</div>}
+            {entry.dd&&<div style={{fontSize:14,marginTop:3,color:"#5A5470"}}>{entry.dd}</div>}
+          </div>
+        )}
+        {entry.ctx&&<div style={{color:"var(--muted)",fontStyle:"italic",fontSize:13,marginTop:12}}>“{entry.ctx}”</div>}
+        <button className="btn btn-green" style={{width:"100%",marginTop:16}}
+          onClick={()=>onResult({correct:true,ms:0,grade:null,mode})}>Got it →</button>
+      </div>
+    );
+  }
+
+  if(mode==="produce"){
+    const clean=String(word).replace(/[^a-zà-öø-ÿ'-]/gi,"");
+    return (
+      <div className="card pop" style={{padding:18}}>
+        <div className="pill">SPELL IT</div>
+        <WordImage entry={entry} hidden={!done}/>
+        {entry.de&&<div style={{fontWeight:800,fontSize:20,marginTop:12}}>{entry.de}</div>}
+        <div style={{color:"var(--muted)",fontSize:14,marginTop:4}}>
+          {hint?"Starts with “"+clean[0]+"”":"Tap the letters in order"}
+        </div>
+        <div style={{marginTop:14}}>
+          <LetterTiles word={word} disabled={done} onDone={settle}/>
+        </div>
+        {!done&&!hint&&(
+          <button className="btn btn-plain" style={{marginTop:10}} onClick={()=>setHint(true)}>💡 Give me a hint</button>
+        )}
+        {done&&<Feedback ok={picked===null?undefined:undefined} entry={entry} word={word}/>}
+      </div>
+    );
+  }
+
+  // recognise | cloze
+  const gap=mode==="cloze"&&entry.ctx
+    ? String(entry.ctx).replace(new RegExp("\\b"+escReg(word)+"\\w*","i"),"_____")
+    : null;
+  return (
+    <div className="card pop" style={{padding:18}}>
+      <div className="pill">{mode==="cloze"?"FILL THE GAP":"WHICH WORD?"}</div>
+      {mode==="recognise"&&<WordImage entry={entry} hidden={!done}/>}
+      {mode==="cloze"&&<div style={{fontSize:19,fontWeight:700,lineHeight:1.55,marginTop:12}}>{gap}</div>}
+      {mode==="recognise"&&entry.de&&(
+        <div style={{fontWeight:800,fontSize:19,marginTop:12}}>{entry.de}</div>
+      )}
+      <div style={{marginTop:14}}>
+        {options.map((o,i)=>{
+          const isRight=String(o).toLowerCase()===String(word).toLowerCase();
+          let cls="opt";
+          if(done&&isRight) cls+=" opt-right";
+          else if(done&&picked===o) cls+=" opt-wrong";
+          return (
+            <div key={i} className={cls}>
+              <button className="opt-badge" disabled={done}
+                aria-label={"Select option "+String.fromCharCode(65+i)}
+                onClick={()=>pick(o)}>{String.fromCharCode(65+i)}</button>
+              <div className="opt-text">{o}</div>
+            </div>
+          );
+        })}
+      </div>
+      {done&&<Feedback entry={entry} word={word}/>}
+    </div>
+  );
+}
+
+function Feedback({entry,word}){
+  return (
+    <div style={{marginTop:12}}>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <span className="serif" style={{fontSize:20,fontWeight:800}}>{word}</span>
+        <button className="spk" aria-label="Say the word" onClick={()=>speak(word)}>🔊</button>
+        <LevelDots e={entry}/>
+      </div>
+      {entry.en&&<div style={{fontSize:15,marginTop:6,lineHeight:1.5}}>{entry.en}</div>}
+      {entry.de&&<div style={{fontSize:15,marginTop:4,fontWeight:700,color:"#5A5470"}}>{entry.de}</div>}
+    </div>
+  );
+}
+
+/* ---------------- parent dashboard ---------------- */
+
+function Spark({vals,color}){
+  const max=Math.max(1,...vals.map(v=>v||0));
+  return (
+    <div className="spark">
+      {vals.map((v,i)=>(
+        <i key={i} style={{height:Math.max(2,Math.round(((v||0)/max)*44)),
+          background:color||"var(--pri)",opacity:v?1:.25}}/>
+      ))}
+    </div>
+  );
+}
+
+function Metric({value,label,sub}){
+  return (
+    <div className="metric">
+      <b>{value==null?"—":value}</b>
+      <span>{label}</span>
+      {sub&&<span style={{display:"block",marginTop:4,color:"var(--muted)",fontWeight:600}}>{sub}</span>}
+    </div>
+  );
+}
+
+function ParentDash({vocab,sessions,reviews,prog,onClose}){
+  const S=sessions||[], R=reviews||[], V=Object.values(vocab||{});
+  const now=Date.now();
+  const mean=a=>a.length?a.reduce((x,y)=>x+y,0)/a.length:null;
+
+  /* Reading speed uses only the stretch between the story appearing and the
+     first comprehension answer, so it measures reading rather than thinking
+     about questions. Sessions too short to be a real read are dropped. */
+  const wpmOf=s=>(s.readMs>4000&&s.readWords>=25)?Math.round(s.readWords/(s.readMs/60000)):null;
+  const wpmAll=S.map(wpmOf);
+  const wpmVals=wpmAll.filter(v=>v!=null);
+  const wpm=wpmVals.length?Math.round(mean(wpmVals.slice(-8))):null;
+  const wpmPrev=wpmVals.length>10?Math.round(mean(wpmVals.slice(-16,-8))):null;
+
+  const comprVals=S.filter(s=>s.qTotal>0).map(s=>s.qFirstTry/s.qTotal);
+  const compr=comprVals.length?Math.round(100*mean(comprVals.slice(-8))):null;
+
+  const lookVals=S.filter(s=>s.words>50).map(s=>(s.lookups/s.words)*100);
+  const lookRate=lookVals.length?(mean(lookVals.slice(-8))).toFixed(1):null;
+
+  const known=V.filter(e=>strengthOf(e)>=1).length;
+  const strong=V.filter(e=>strengthOf(e)>=3).length;
+  const meeting=V.length-known;
+
+  const recentR=R.slice(-150);
+  const retention=recentR.length?Math.round(100*recentR.filter(r=>r.g>=3).length/recentR.length):null;
+
+  /* minutes per day, last 14 days */
+  const dayKey=t=>{const d=new Date(t); return d.getFullYear()+"-"+d.getMonth()+"-"+d.getDate();};
+  const byDay={};
+  S.forEach(s=>{ const k=dayKey(s.t); byDay[k]=(byDay[k]||0)+(s.ms||0); });
+  const days=[];
+  for(let i=13;i>=0;i--){
+    const k=dayKey(now-i*DAY);
+    days.push(Math.round((byDay[k]||0)/60000));
+  }
+  const minsWeek=days.slice(-7).reduce((a,b)=>a+b,0);
+
+  let streak=0;
+  for(let i=0;i<400;i++){
+    if(byDay[dayKey(now-i*DAY)]) streak++;
+    else if(i>0) break;
+  }
+
+  /* how many reviews fall due on each of the next seven days */
+  const forecast=[0,0,0,0,0,0,0];
+  V.forEach(e=>{
+    if(e.due==null) return;
+    const d=Math.floor((e.due-now)/DAY);
+    if(d<0) forecast[0]++; else if(d<7) forecast[d]++;
+  });
+
+  const lapseCount={};
+  R.forEach(r=>{ if(r.g===1) lapseCount[r.k]=(lapseCount[r.k]||0)+1; });
+  const struggling=Object.entries(lapseCount).sort((a,b)=>b[1]-a[1]).slice(0,6)
+    .map(([k,n])=>({w:(vocab[k]&&vocab[k].w)||k,n}));
+
+  const totalWords=S.reduce((a,s)=>a+(s.words||0),0);
+  const trend=(wpm!=null&&wpmPrev!=null)?(wpm-wpmPrev):null;
+
+  return (
+    <div className="fi" style={{paddingBottom:40}}>
+      <div style={{display:"flex",alignItems:"center",gap:12,padding:"14px 0"}}>
+        <button className="icon-btn" aria-label="Close" onClick={onClose}>✕</button>
+        <div style={{fontWeight:800,fontSize:19}}>Parent view</div>
+      </div>
+      <div style={{fontSize:13,color:"var(--muted)",lineHeight:1.5}}>
+        {READER_NAME}’s reading, on this device only. Nothing here is uploaded.
+      </div>
+
+      <div className="dash-h">READING</div>
+      <div className="dash-grid">
+        <Metric value={wpm} label="words per minute"
+          sub={trend==null?null:(trend>=0?"▲ "+trend+" vs earlier":"▼ "+Math.abs(trend)+" vs earlier")}/>
+        <Metric value={compr==null?null:compr+"%"} label="comprehension, first try"/>
+        <Metric value={lookRate} label="word taps per 100 words" sub={lookRate==null?null:(lookRate>18?"text may be too hard":lookRate<3?"could go harder":"good fit")}/>
+        <Metric value={prog.level} label="reading level, 1–5"/>
+      </div>
+      {wpmVals.length>1&&(
+        <>
+          <div className="dash-h">READING SPEED OVER TIME</div>
+          <Spark vals={wpmAll.map(v=>v||0).slice(-24)}/>
+        </>
+      )}
+
+      <div className="dash-h">WORDS</div>
+      <div className="dash-grid">
+        <Metric value={V.length} label="words collected"/>
+        <Metric value={strong} label="strong (a month or more)"/>
+        <Metric value={meeting} label="still being met"/>
+        <Metric value={retention==null?null:retention+"%"} label="recalled at review"
+          sub={retention==null?null:(retention<75?"reviews landing too late":retention>95?"could be spaced further":"about right")}/>
+      </div>
+
+      <div className="dash-h">REVIEWS DUE, NEXT 7 DAYS</div>
+      <Spark vals={forecast} color="var(--honey)"/>
+      <div style={{fontSize:12,color:"var(--muted)",marginTop:4}}>
+        today {forecast[0]} · then {forecast.slice(1).join(" · ")}
+      </div>
+
+      {struggling.length>0&&(
+        <>
+          <div className="dash-h">WORDS THAT KEEP SLIPPING</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+            {struggling.map(x=>(
+              <span key={x.w} className="chip" style={{background:"#F7E7E4",color:"#8A3B31"}}>
+                {x.w} · {x.n}×
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+
+      <div className="dash-h">TIME IN THE APP</div>
+      <Spark vals={days} color="var(--pri)"/>
+      <div className="dash-grid" style={{marginTop:10}}>
+        <Metric value={minsWeek+" min"} label="last 7 days"/>
+        <Metric value={streak} label={streak===1?"day in a row":"days in a row"}/>
+        <Metric value={S.length} label="sessions all time"/>
+        <Metric value={totalWords.toLocaleString()} label="words read all time"/>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- main app ---------------- */
 export default function App(){
   const [ready,setReady]=useState(false);
@@ -984,6 +1466,8 @@ export default function App(){
   const [hl,setHl]=useState(null);
   const [popup,setPopup]=useState(null);
   const [cards,setCards]=useState(null);
+  const [sessions,setSessions]=useState([]);
+  const [dash,setDash]=useState(false);
   const [stats,setStats]=useState(null);
   const [ch2,setCh2]=useState(false); // false | true (loading) | "err"
   const [msgI,setMsgI]=useState(0);
@@ -998,6 +1482,15 @@ export default function App(){
   const secRefs=useRef([]);
   const sessionStart=useRef(0);
   const bumpedRef=useRef(new Set()); // guards against double SRS-bump per word per sitting
+  /* ---- measurement, all on this device, nothing sent anywhere ---- */
+  const reviewLog=useRef([]);       // one record per graded word review
+  const storyShownAt=useRef(0);     // when chapter 1 first appeared
+  const firstAnswerAt=useRef(0);    // first comprehension answer = end of the read
+  const screenOnAt=useRef(Date.now());
+  const activeMs=useRef(0);
+  const readWords=useRef(0);
+  const sessionsRef=useRef([]);
+  const reviewsRef=useRef([]);
   const wakeRef=useRef(null);        // screen wake lock while a generation is running
   const chapterBusy=useRef(false);   // guards continueChapter against a double tap
 
@@ -1060,9 +1553,21 @@ export default function App(){
     const p=await sGet("progress",null);
     const wc=await sGet("wcache",null);
     const lib=await sGet("library",null);
+    const ss=await sGet("sessions",null);
+    const rv=await sGet("reviews",null);
+    if(Array.isArray(ss)){ sessionsRef.current=ss; setSessions(ss); }
+    if(Array.isArray(rv)){ reviewsRef.current=rv; }
     if(v&&typeof v==="object"){
       const mv={};
-      Object.entries(v).forEach(([k,e])=>{ mv[k]={...e,w:e.w||k,forms:e.forms||[k]}; });
+      let changed=false;
+      Object.entries(v).forEach(([k,e])=>{
+        const m=migrateEntry({...e,w:e.w||k,forms:e.forms||[k]});
+        if(m.s!=null&&e.s==null) changed=true;
+        mv[k]=m;
+      });
+      // Write the converted entries straight back, so the old ladder is gone
+      // for good rather than being re-derived on every launch.
+      if(changed) sSet("vocab",mv);
       setVocab(mv);
     }
     if(wc&&typeof wc==="object") setWcache(wc);
@@ -1096,7 +1601,6 @@ export default function App(){
   const qNum=useMemo(()=>{
     const m={}; const counters={};
     if(story) story.questions.forEach(q=>{
-      if(q.isVocab) return;
       const ch=q.chapter||0;
       counters[ch]=(counters[ch]||0)+1;
       m[q.id]=counters[ch];
@@ -1111,8 +1615,8 @@ export default function App(){
     const total=curChapterQs.length||1;
     const done=curChapterQs.filter(q=>answers[q.id]&&answers[q.id].done).length;
     let v=10+(done/total)*70;
-    if(screen==="cards"&&cards&&cards.list.length){
-      v=80+(Math.min(cards.i,cards.list.length)/cards.list.length)*20;
+    if(screen==="cards"&&cards&&cards.q.length){
+      v=80+(Math.min(cards.i,cards.q.length)/cards.q.length)*20;
     }
     return Math.min(99,Math.round(v));
   }
@@ -1166,50 +1670,6 @@ export default function App(){
       }catch(e){ if(kept.length===0) kept=evFixed; }
     }
     return kept.map(q=>{ const c={...q}; delete c.evOk; return c; });
-  }
-
-  /* ---- local vocab question from recycled words ---- */
-  function mentionsWord(text,word){
-    if(!text||!word) return false;
-    return new RegExp("\\b"+escReg(word)+"\\b","i").test(text);
-  }
-
-  function buildVocabQ(secs,recycle){
-    for(const lem of (recycle||[])){
-      const key=findKey(lem);
-      if(!key) continue;
-      const e=vocab[key];
-      if(!e||!e.clue) continue;
-      if(mentionsWord(e.clue,e.w)) continue; // clue gives the answer away, skip this candidate
-      let hit=-1;
-      for(let i=0;i<secs.length&&hit<0;i++){
-        const toks=secs[i].split(/[^A-Za-zÀ-ÖØ-öø-ÿ'’-]+/);
-        for(const t of toks){
-          if(t&&t.length>2&&findKey(t)===key){ hit=i; break; }
-        }
-      }
-      if(hit<0) continue;
-      const others=shuffle(Object.values(vocab).filter(x=>x!==e&&x.w&&String(x.w).toLowerCase()!==String(e.w).toLowerCase()).map(x=>x.w));
-      const distr=others.slice(0,3);
-      if(distr.length<3){
-        const pool=shuffle([...new Set(secs.join(" ").split(/[^A-Za-z]+/)
-          .filter(w=>w.length>=5&&findKey(w)!==key))]);
-        while(distr.length<3&&pool.length){
-          const c=pool.pop();
-          if(c&&!distr.includes(c)) distr.push(c.toLowerCase());
-        }
-      }
-      if(distr.length<3) continue; // try the next recycle candidate instead of giving up entirely
-      const correct=Math.floor(Math.random()*4);
-      const opts=[...distr]; opts.splice(correct,0,e.w);
-      return {
-        id:"vq_"+Math.random().toString(36).slice(2,8),
-        q:'Which word in the text means: “'+e.clue+'”?',
-        options:opts, correct, section:hit,
-        isVocab:true, vocabKey:key, evidence:""
-      };
-    }
-    return null;
   }
 
   /* ---- known-word sense drift check (polysemy) ----
@@ -1432,9 +1892,10 @@ export default function App(){
       try{
         const validated=await validateQuestions(secs,qsRaw);
         if(reqRef.current!==rid) return;
-        let nq=validated.map(q=>({...q,chapter:0,after:secs.length-1}));
-        const vq=buildVocabQ(secs,recycle);
-        if(vq) nq=[...nq,{...vq,chapter:0,after:secs.length-1}];
+        // Comprehension questions only. Word questions used to be appended here;
+        // vocabulary is now practised on its own screen, where the exercise format
+        // can be matched to how well each word is actually known.
+        const nq=validated.map(q=>({...q,chapter:0,after:secs.length-1}));
         // saveToLibrary calls setLibrary, so it must not run inside a setStory updater.
         const libId=saveToLibrary({...st,questions:nq,validated:true});
         setStory(cur=>cur?{...cur,questions:nq,validated:true,libId}:cur);
@@ -1493,9 +1954,7 @@ export default function App(){
         const off=cur.sections.length;
         const allSecs=[...cur.sections,...secs];
         const chIdx=cur.chapterEnds.length;
-        let added=qs.map(q=>({...q,section:q.section+off,chapter:chIdx,after:allSecs.length-1}));
-        const vq=buildVocabQ(secs,recycle);
-        if(vq) added=[...added,{...vq,section:vq.section+off,chapter:chIdx,after:allSecs.length-1}];
+        const added=qs.map(q=>({...q,section:q.section+off,chapter:chIdx,after:allSecs.length-1}));
         const ns={
           ...cur, sections:allSecs,
           chapterEnds:[...cur.chapterEnds,allSecs.length-1],
@@ -1535,7 +1994,7 @@ export default function App(){
       ctx:sentence, en:c.en||"", de:c.de||"", dd:c.dd||"",
       sense:c.sense||"", also:Array.isArray(c.also)?c.also:[], alsoDe:Array.isArray(c.alsoDe)?c.alsoDe:[],
       clue:c.clue||"",
-      added:Date.now(), iv:0, due:Date.now()+SRS_DAYS[0]*DAY
+      added:Date.now(), s:null, d:null, reps:0, lapses:0, due:Date.now()
     };
     setVocab(v=>{
       if(v[cacheKey]) return v;
@@ -1559,7 +2018,7 @@ export default function App(){
         w:lemma, forms:[surface],
         ctx:sentence, en:String(j.en||""), de:String(j.de||""), dd:String(j.deDesc||""),
         sense, also, alsoDe, clue,
-        added:Date.now(), iv:0, due:Date.now()+SRS_DAYS[0]*DAY
+        added:Date.now(), s:null, d:null, reps:0, lapses:0, due:Date.now()
       };
       setVocab(v=>{
         const prev=v[key];
@@ -1657,19 +2116,24 @@ export default function App(){
   }
 
   /* ---- questions ---- */
-  function bumpSrs(key,success){
-    if(bumpedRef.current.has(key)) return; // already advanced this word this sitting
-    bumpedRef.current.add(key);
+  /* One graded review. The grade comes from what she actually did - whether
+     she got it right, how long it took, whether she asked for a hint - not
+     from asking her to rate her own memory. */
+  function gradeWord(key,grade,mode,ms){
     setVocab(v=>{
       const e=v[key]; if(!e) return v;
-      const iv= success? Math.min((e.iv||0)+1,SRS_DAYS.length-1) : 0;
-      const nv={...v,[key]:{...e,iv,due:Date.now()+SRS_DAYS[iv]*DAY}};
+      const nv={...v,[key]:schedule(e,grade,Date.now())};
       sSet("vocab",nv);
       return nv;
     });
+    const rec={t:Date.now(),k:key,g:grade,m:mode,ms:ms||0};
+    reviewLog.current.push(rec);
+    const all=[...(reviewsRef.current||[]),rec].slice(-1200);
+    reviewsRef.current=all; sSet("reviews",all);
   }
 
   function pickAnswer(q,idx){
+    if(!firstAnswerAt.current) firstAnswerAt.current=Date.now();
     const a=answers[q.id]||{attempts:0,done:false,gotRight:false,reveal:false,picked:[]};
     if(a.done||a.picked.includes(idx)) return;
     let na;
@@ -1686,16 +2150,31 @@ export default function App(){
       setHl(null);
     }
     setAnswers(sst=>({...sst,[q.id]:na}));
-    if(q.isVocab&&na.done&&q.vocabKey&&vocab[q.vocabKey]
-       &&vocab[q.vocabKey].added<sessionStart.current){
-      bumpSrs(q.vocabKey,na.gotRight);
-    }
   }
 
-  /* ---- session end, flashcards ---- */
+  /* ---- measurement ----
+     Everything below stays in localStorage on this iPad. Nothing about
+     either child is sent anywhere and none of it goes near the repo. */
+  function logSession(o){
+    const readMs=(firstAnswerAt.current&&storyShownAt.current)
+      ? firstAnswerAt.current-storyShownAt.current : 0;
+    const rec={
+      t:Date.now(),
+      ms:Math.round(activeMs.current+(Date.now()-screenOnAt.current)),
+      readMs, readWords:readWords.current,
+      words:o.wc, qTotal:o.total, qFirstTry:o.firstTry,
+      lookups:Object.keys(lookups).length, newWords:o.newW,
+      level:prog.level, chapters:story?story.chapterEnds.length:1,
+    };
+    const all=[...(sessionsRef.current||[]),rec].slice(-400);
+    sessionsRef.current=all; sSet("sessions",all);
+    setSessions(all);
+  }
+
+  /* ---- session end, word practice ---- */
   function finishReading(){
     if(!story) return;
-    const compr=story.questions.filter(q=>!q.isVocab);
+    const compr=story.questions;
     const total=compr.length;
     const firstTry=compr.filter(q=>answers[q.id]&&answers[q.id].gotRight).length;
     const errRate= total? (total-firstTry)/total : 0;
@@ -1712,45 +2191,70 @@ export default function App(){
       const np={...prog,sessions:prog.sessions+1};
       setProg(np); sSet("progress",np);
     }
-    const vqs=story.questions.filter(q=>q.isVocab);
-    const vqRight=vqs.filter(q=>answers[q.id]&&answers[q.id].gotRight).length;
     const newW=Object.values(vocab).filter(e=>e.added>=sessionStart.current).length;
-    setStats({firstTry,total,wc,newW,vqRight,vqTotal:vqs.length});
+    setStats({firstTry,total,wc,newW});
+    logSession({firstTry,total,wc,newW});
+    buildPractice();
+  }
+
+  /* Order matters. New words are met first, the due reviews act as the gap,
+     and the new words come back for retrieval at the end. In children an
+     expanding schedule with a short first gap produces better retrieval
+     than evenly spaced trials, and the early success carries into the
+     longer gaps that follow. */
+  function buildPractice(){
     const now=Date.now();
     const due=Object.entries(vocab)
       .filter(en=>en[1].due<=now&&en[1].added<sessionStart.current)
       .sort((a,b)=>a[1].due-b[1].due)
-      .slice(0,8)
+      .slice(0,10)
       .map(en=>en[0]);
     const fresh=Object.entries(vocab)
       .filter(en=>en[1].added>=sessionStart.current&&!due.includes(en[0]))
       .sort((a,b)=>b[1].added-a[1].added)
-      .slice(0,Math.max(0,10-due.length))
+      .slice(0,Math.max(0,12-due.length))
       .map(en=>en[0]);
-    const list=[...due,...fresh];
-    if(list.length===0){
-      setCards({list:[],i:0,flip:false,right:0});
-      setScreen("done");
-    }else{
-      setCards({list,i:0,flip:false,right:0});
-      setScreen("cards");
-    }
+    const q=[];
+    for(const k of fresh) q.push({key:k,mode:"meet"});
+    for(const k of due) q.push({key:k,mode:modeFor(vocab[k])});
+    for(const k of fresh) q.push({key:k,mode:"recognise"});
+    if(!q.length){ setCards(null); setScreen("done"); return; }
+    setCards({q,i:0,right:0,graded:0});
+    setScreen("cards");
   }
 
-  function answerCard(known){
-    if(!cards) return;
-    const key=cards.list[cards.i];
-    const e=vocab[key];
-    if(e&&e.added<sessionStart.current){ bumpSrs(key,known); }
-    // words learned today: learning step only — first SRS review stays tomorrow
-    const next=cards.i+1;
-    const right=cards.right+(known?1:0);
-    if(next>=cards.list.length){
-      setCards(c=>({...c,i:next,right}));
-      setScreen("done");
-    }else{
-      setCards(c=>({...c,i:next,flip:false,right}));
+  /* Three or four plausible wrong answers, preferring other words she knows
+     over words pulled from nowhere. */
+  function optionsFor(key){
+    const e=vocab[key]; if(!e) return [];
+    const pool=Object.values(vocab)
+      .filter(x=>x.w&&String(x.w).toLowerCase()!==String(e.w).toLowerCase())
+      .map(x=>x.w);
+    const distr=shuffle(pool).slice(0,3);
+    const filler=["clever","quiet","bright","gather","narrow","sudden","gentle","steady"];
+    while(distr.length<3){
+      const c=rand(filler);
+      if(!distr.includes(c)&&c!==e.w) distr.push(c);
     }
+    return shuffle([e.w,...distr]);
+  }
+
+  function onPracticeResult(res){
+    if(!cards) return;
+    const item=cards.q[cards.i];
+    if(res.grade!=null) gradeWord(item.key,res.grade,res.mode,res.ms);
+    const right=cards.right+(res.correct?1:0);
+    const graded=cards.graded+(res.grade!=null?1:0);
+    setCards(c=>({...c,right,graded}));
+    const delay=res.grade==null?0:900;
+    setTimeout(()=>{
+      setCards(c=>{
+        if(!c) return c;
+        const next=c.i+1;
+        if(next>=c.q.length){ setScreen("done"); return {...c,i:next}; }
+        return {...c,i:next};
+      });
+    },delay);
   }
 
   /* ---- vocab management ---- */
@@ -1772,12 +2276,42 @@ export default function App(){
     setScreen("home");
   }
 
+  /* Reading-speed window: from the story appearing to the first answer. */
+  useEffect(()=>{
+    if(story&&story.sections&&story.sections.length&&!storyShownAt.current){
+      storyShownAt.current=Date.now();
+      const end=(story.chapterEnds&&story.chapterEnds[0]!=null)?story.chapterEnds[0]:story.sections.length-1;
+      readWords.current=countWords(story.sections.slice(0,end+1));
+    }
+    if(!story){ storyShownAt.current=0; firstAnswerAt.current=0; readWords.current=0;
+      activeMs.current=0; screenOnAt.current=Date.now(); }
+  },[story]);
+
+  /* Only count time with the app actually in front. */
+  useEffect(()=>{
+    function onVis(){
+      if(typeof document==="undefined") return;
+      if(document.hidden){ activeMs.current+=Date.now()-screenOnAt.current; }
+      else{ screenOnAt.current=Date.now(); }
+    }
+    if(typeof document!=="undefined") document.addEventListener("visibilitychange",onVis);
+    return ()=>{ if(typeof document!=="undefined") document.removeEventListener("visibilitychange",onVis); };
+  },[]);
+
+  /* Hold the ✨ counter for a second and a half to open the parent view.
+     Not a secret, just out of the way of a child tapping around. */
+  const holdRef=useRef(null);
+  function startHold(){ holdRef.current=setTimeout(()=>setDash(true),1500); }
+  function cancelHold(){ if(holdRef.current){ clearTimeout(holdRef.current); holdRef.current=null; } }
+
   const topBar=(
     <div style={{position:"sticky",top:0,zIndex:20,background:"var(--bg)",padding:"12px 0 10px"}}>
       <div style={{display:"flex",alignItems:"center",gap:12}}>
         <button className="icon-btn" aria-label="Home" onClick={goHome}>🏠</button>
         <Bar value={progressVal()}/>
-        <div className="chip">✨ {knownCount}</div>
+        <div className="chip" onPointerDown={startHold} onPointerUp={cancelHold}
+          onPointerLeave={cancelHold} onContextMenu={e=>e.preventDefault()}
+          style={{userSelect:"none",WebkitUserSelect:"none",touchAction:"manipulation"}}>✨ {knownCount}</div>
       </div>
     </div>
   );
@@ -1792,13 +2326,29 @@ export default function App(){
     );
   }
 
+  /* Full-screen so nothing from the child's session shows behind it. */
+  if(dash){
+    return (
+      <div className="app"><style>{CSS}</style>
+        <div className="wrap">
+          <ParentDash vocab={vocab} sessions={sessions} reviews={reviewsRef.current}
+            prog={prog} onClose={()=>setDash(false)}/>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app"><style>{CSS}</style>
       <div className="wrap">
 
         {screen==="home"&&(
           <div className="fi">
-            <div style={{display:"flex",alignItems:"center",gap:8,padding:"18px 0 4px",fontWeight:800,color:"var(--muted)",fontSize:14,letterSpacing:1}}>
+            <div className="chip" onPointerDown={startHold} onPointerUp={cancelHold}
+              onPointerLeave={cancelHold} onContextMenu={e=>e.preventDefault()}
+              style={{display:"flex",alignItems:"center",gap:8,padding:"18px 0 4px",fontWeight:800,
+                color:"var(--muted)",fontSize:14,letterSpacing:1,background:"none",
+                userSelect:"none",WebkitUserSelect:"none",touchAction:"manipulation"}}>
               <span style={{fontSize:20}}>📚</span> STORY TIME
             </div>
             <div style={{textAlign:"center",padding:"24px 0 12px"}}>
@@ -1914,8 +2464,8 @@ export default function App(){
                             </div>
                             {e.de&&<div style={{color:"var(--muted)",fontSize:14,marginTop:2}}>{e.de}</div>}
                             <div style={{display:"flex",alignItems:"center",gap:6,marginTop:6}}>
-                              <LevelDots iv={e.iv||0}/>
-                              <span style={{fontSize:11,fontWeight:700,color:"var(--muted)"}}>Level {(e.iv||0)+1}/{SRS_DAYS.length}</span>
+                              <LevelDots e={e}/>
+                              <span style={{fontSize:11,fontWeight:700,color:"var(--muted)"}}>{STRENGTH_NAMES[strengthOf(e)]}</span>
                             </div>
                           </div>
                           <div style={{color:d<=0?"var(--pri-dark)":"var(--muted)",fontSize:12,fontWeight:700,whiteSpace:"nowrap"}}>{dueTxt}</div>
@@ -2057,51 +2607,18 @@ export default function App(){
           </div>
         )}
 
-        {screen==="cards"&&cards&&cards.i<cards.list.length&&vocab[cards.list[cards.i]]&&(
+        {screen==="cards"&&cards&&cards.i<cards.q.length&&vocab[cards.q[cards.i].key]&&(
           <div className="fi">
             {topBar}
             <div style={{textAlign:"center",margin:"18px 0 8px",fontWeight:800,color:"var(--muted)",fontSize:15}}>
-              Word practice · Card {cards.i+1} of {cards.list.length}
+              Word practice · {cards.i+1} of {cards.q.length}
             </div>
-            <div className="card flashcard pop" key={cards.list[cards.i]+String(cards.flip)}
-              onClick={()=>{ if(!cards.flip) setCards(c=>({...c,flip:true})); }}>
-              {!cards.flip?(
-                <>
-                  <div className="serif" style={{fontSize:36,fontWeight:800}}>
-                    <span className="hi">{vocab[cards.list[cards.i]].w}</span>
-                  </div>
-                  <button className="spk" style={{marginTop:18}} aria-label="Say the word"
-                    onClick={ev=>{ev.stopPropagation();speak(vocab[cards.list[cards.i]].w);}}>🔊</button>
-                  <div style={{color:"var(--muted)",marginTop:22,fontSize:15}}>Do you remember it? Tap the card to turn it.</div>
-                </>
-              ):(
-                <>
-                  <div className="serif" style={{fontSize:26,fontWeight:800}}>{vocab[cards.list[cards.i]].w}</div>
-                  <div style={{display:"flex",alignItems:"center",gap:6,marginTop:6}}>
-                    <LevelDots iv={vocab[cards.list[cards.i]].iv||0}/>
-                    <span style={{fontSize:12,fontWeight:700,color:"var(--muted)"}}>Level {(vocab[cards.list[cards.i]].iv||0)+1}/{SRS_DAYS.length}</span>
-                  </div>
-                  <div style={{fontSize:17,marginTop:12,lineHeight:1.55}}>{vocab[cards.list[cards.i]].en}</div>
-                  {(vocab[cards.list[cards.i]].de||vocab[cards.list[cards.i]].dd)&&(
-                    <div className="de-box" style={{width:"100%"}}>
-                      {vocab[cards.list[cards.i]].de&&<div style={{fontWeight:800,fontSize:18}}>{vocab[cards.list[cards.i]].de}</div>}
-                      {vocab[cards.list[cards.i]].dd&&<div style={{fontSize:14,marginTop:3,color:"#5A5470"}}>{vocab[cards.list[cards.i]].dd}</div>}
-                    </div>
-                  )}
-                  {vocab[cards.list[cards.i]].ctx&&(
-                    <div style={{color:"var(--muted)",fontStyle:"italic",fontSize:13,marginTop:12}}>
-                      “{vocab[cards.list[cards.i]].ctx}”
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-            {cards.flip&&(
-              <div style={{display:"flex",gap:12,marginTop:16}}>
-                <button className="btn btn-plain" style={{flex:1}} onClick={()=>answerCard(false)}>✗ Not yet</button>
-                <button className="btn btn-green" style={{flex:1}} onClick={()=>answerCard(true)}>✓ I knew it</button>
-              </div>
-            )}
+            <PracticeCard
+              key={cards.q[cards.i].key+"_"+cards.q[cards.i].mode+"_"+cards.i}
+              item={cards.q[cards.i]}
+              entry={vocab[cards.q[cards.i].key]}
+              options={optionsFor(cards.q[cards.i].key)}
+              onResult={onPracticeResult}/>
           </div>
         )}
 
@@ -2115,16 +2632,13 @@ export default function App(){
                 <>
                   <div style={{padding:"6px 0",fontSize:17}}>📖 You read <b>{stats.wc}</b> words</div>
                   <div style={{padding:"6px 0",fontSize:17}}>✅ <b>{stats.firstTry} of {stats.total}</b> questions right on the first try</div>
-                  {stats.vqTotal>0&&(
-                    <div style={{padding:"6px 0",fontSize:17}}>💡 <b>{stats.vqRight} of {stats.vqTotal}</b> word questions solved</div>
-                  )}
                   <div style={{padding:"6px 0",fontSize:17}}>✏️ <b>{stats.newW}</b> new {stats.newW===1?"word":"words"} collected</div>
                 </>
               )}
-              {cards&&cards.list.length>0&&(
-                <div style={{padding:"6px 0",fontSize:17}}>🃏 You practiced <b>{cards.list.length}</b> {cards.list.length===1?"word":"words"}</div>
+              {cards&&cards.q.length>0&&(
+                <div style={{padding:"6px 0",fontSize:17}}>🧠 <b>{cards.right}</b> of <b>{cards.graded}</b> word exercises right</div>
               )}
-              {cards&&cards.list.length===0&&(
+              {!cards&&(
                 <div style={{padding:"6px 0",fontSize:14,color:"var(--muted)"}}>No word cards today. Your words will be ready to practice soon!</div>
               )}
             </div>
@@ -2150,8 +2664,8 @@ export default function App(){
               )}
               {popup.data&&!popup.loading&&(
                 <div style={{display:"flex",alignItems:"center",gap:6,marginTop:4}}>
-                  <LevelDots iv={popup.data.iv||0}/>
-                  <span style={{fontSize:12,fontWeight:700,color:"var(--muted)"}}>Level {(popup.data.iv||0)+1}/{SRS_DAYS.length}</span>
+                  <LevelDots e={popup.data}/>
+                  <span style={{fontSize:12,fontWeight:700,color:"var(--muted)"}}>{STRENGTH_NAMES[strengthOf(popup.data)]}</span>
                 </div>
               )}
               <div style={{color:"var(--muted)",fontSize:13,fontStyle:"italic",margin:"6px 0 2px"}}>“{popup.sentence}”</div>
