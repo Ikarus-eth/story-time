@@ -14,7 +14,9 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
    • Vocab management (search / sort / delete)
    • "Read again" library (last 5 stories, no API cost)
    • In-story vocab question that feeds the SRS
-   Persistence → localStorage (namespaced "st_..."): vocab, progress, wcache, library
+   Persistence → localStorage (namespaced "st_..."): vocab, progress, wcache, library, answers
+   A story can be left and picked up later: its answers are kept with it, so
+   chapters already unlocked stay unlocked.
    ============================================================ */
 
 const DAY = 86400000;
@@ -1424,6 +1426,14 @@ export default function App(){
   const reviewsRef=useRef([]);
   const wakeRef=useRef(null);        // screen wake lock while a generation is running
   const chapterBusy=useRef(false);   // guards continueChapter against a double tap
+  /* ---- resuming a story ----
+     answerBook  libId -> the answers that story already has, so reopening it
+                 does not ask the same questions again
+     readFrom    first section of THIS sitting; >0 when a story was resumed
+     newReading  did this sitting produce text she had not read before */
+  const answerBookRef=useRef({});
+  const readFrom=useRef(0);
+  const newReadingRef=useRef(false);
 
   /* Keep the iPad awake while Claude is writing - a locked screen suspends the
      fetch and the generation is lost. Silently unsupported on desktop Safari. */
@@ -1486,6 +1496,8 @@ export default function App(){
     const p=await sGet("progress",null);
     const wc=await sGet("wcache",null);
     const lib=await sGet("library",null);
+    const ab=await sGet("answers",null);
+    if(ab&&typeof ab==="object"&&!Array.isArray(ab)) answerBookRef.current=ab;
     const wd=await sGet("world",null);
     if(wd&&Array.isArray(wd.cast)) setWorld({cast:wd.cast});
     const ss=await sGet("sessions",null);
@@ -1532,7 +1544,9 @@ export default function App(){
   const curChapterDone = story&&story.validated
     ? curChapterQs.every(q=>answers[q.id]&&answers[q.id].done)
     : false;
-  const atCap = story ? (story.isFact||story.replay||story.chapterEnds.length>=MAX_CHAPTERS) : false;
+  /* A reopened story is paused, not finished. It ends where a fresh one ends:
+     at MAX_CHAPTERS, or straight away for a facts page, which has no chapters. */
+  const atCap = story ? (story.isFact||story.chapterEnds.length>=MAX_CHAPTERS) : false;
   const qNum=useMemo(()=>{
     const m={}; const counters={};
     if(story) story.questions.forEach(q=>{
@@ -1727,6 +1741,23 @@ export default function App(){
     }catch(e){}
   }
 
+  /* ---- answers kept with the story ----
+     Question ids are minted once and travel with the library entry, so they
+     still match when the story is reopened days later. Answers are pruned
+     against the library, so they disappear when the story they belong to
+     falls off the end of it. */
+  useEffect(()=>{
+    const id=story&&story.libId;
+    if(!id) return;
+    const keep=new Set(library.map(e=>String(e.id)));
+    keep.add(String(id));
+    const merged={...answerBookRef.current,[id]:answers};
+    const next={};
+    Object.keys(merged).forEach(k=>{ if(keep.has(String(k))) next[k]=merged[k]; });
+    answerBookRef.current=next;
+    sSet("answers",next);
+  },[answers,story&&story.libId,library]);
+
   /* ---- library (read again) ---- */
   function saveToLibrary(st){
     const entry={
@@ -1734,6 +1765,9 @@ export default function App(){
       topic:st.topic, title:st.title, wish:st.wish||"",
       sections:st.sections, questions:st.questions,
       chapterEnds:st.chapterEnds, chapterImages:st.chapterImages,
+      /* Carried so a reopened story can be continued: the next chapter is
+         written from the summary, and the cast has to stay the same people. */
+      summary:st.summary||"", cast:Array.isArray(st.cast)?st.cast:[],
       isFact:!!st.isFact
     };
     setLibrary(l=>{
@@ -1752,15 +1786,27 @@ export default function App(){
     bumpedRef.current=new Set();
     setSenseMap({});
     setSteerWish("");
-    setAnswers({}); setLookups({}); setHl(null); setPopup(null);
+    /* Only settled answers come back. A question she was halfway through -
+       one wrong guess, no second try - starts clean rather than reopening
+       on "not quite". */
+    const saved=answerBookRef.current[entry.id]||answerBookRef.current[String(entry.id)]||{};
+    const restored={};
+    Object.keys(saved).forEach(qid=>{
+      const a=saved[qid];
+      if(a&&a.done) restored[qid]={...a,restored:true};
+    });
+    setAnswers(restored); setLookups({}); setHl(null); setPopup(null);
     setCards(null); setStats(null); setCh2(false);
+    readFrom.current=(entry.sections||[]).length;
+    newReadingRef.current=false;
     setStory({
       topic:entry.topic, title:entry.title,
       sections:entry.sections, questions:entry.questions,
       chapterEnds:entry.chapterEnds||[entry.sections.length-1],
       chapterImages:entry.chapterImages||[{prompt:"",seed:1}],
       isFact:!!entry.isFact,
-      wish:entry.wish, summary:"", steerWish:"",
+      wish:entry.wish, summary:entry.summary||"", steerWish:"",
+      cast:Array.isArray(entry.cast)?entry.cast:[],
       validated:true, replay:true, libId:entry.id
     });
     setScreen("read");
@@ -1780,6 +1826,8 @@ export default function App(){
     sessionStart.current=Date.now();
     secRefs.current=[];
     bumpedRef.current=new Set();
+    readFrom.current=0;
+    newReadingRef.current=true;
     setSenseMap({});
     setSteerWish("");
     const L=LEVELS[prog.level]||LEVELS[2];
@@ -1904,6 +1952,7 @@ export default function App(){
         return ns;
       });
       checkKnownSenses(rid,secs);
+      newReadingRef.current=true;   // a resumed story that grows is real reading again
       setSteerWish("");
       releaseAwake();
       setCh2(false);
@@ -2111,14 +2160,20 @@ export default function App(){
   /* ---- session end, word practice ---- */
   function finishReading(){
     if(!story) return;
-    const compr=story.questions;
+    /* Questions restored from an earlier sitting were answered then and scored
+       then. Grading them again would let one good chapter keep counting every
+       time the story is reopened. */
+    const answeredNow=story.questions.filter(q=>answers[q.id]&&!answers[q.id].restored);
+    const compr=answeredNow.length?answeredNow:story.questions;
     const total=compr.length;
     const firstTry=compr.filter(q=>answers[q.id]&&answers[q.id].gotRight).length;
     const errRate= total? (total-firstTry)/total : 0;
     const wc=countWords(story.sections);
     const lk=Object.keys(lookups).length;
-    const per100= wc? (lk/wc)*100 : 0;
-    if(!story.replay){
+    // Lookups are from this sitting, so measure them against this sitting's text.
+    const wcNew=countWords(story.sections.slice(readFrom.current))||wc;
+    const per100= wcNew? (lk/wcNew)*100 : 0;
+    if(newReadingRef.current){
       let lvl=prog.level;
       if(errRate<0.25&&per100<=8) lvl=Math.min(5,lvl+1);
       else if(errRate>0.5||per100>18) lvl=Math.max(1,lvl-1);
@@ -2411,6 +2466,11 @@ export default function App(){
                       <button key={en.id} className="lib-row" onClick={()=>openFromLibrary(en)}>
                         <span style={{fontSize:22}}>{t?t.emoji:"✨"}</span>
                         <span style={{flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{en.title}</span>
+                        {(en.chapterEnds||[]).length>1&&(
+                          <span style={{color:"var(--muted)",fontSize:13,fontWeight:700,flex:"none"}}>
+                            {en.chapterEnds.length}/{MAX_CHAPTERS}
+                          </span>
+                        )}
                         <span style={{color:"var(--pri)",fontSize:19}}>↺</span>
                       </button>
                     );
